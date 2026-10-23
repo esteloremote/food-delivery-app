@@ -98,6 +98,7 @@ export default function Home() {
               slots: [],
             };
           }
+          
           groupedVenues[vName].slots.push(slot);
         });
 
