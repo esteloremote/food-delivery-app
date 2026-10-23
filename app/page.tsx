@@ -162,10 +162,12 @@ export default function Home() {
         // Δημιουργία κράτησης
         transaction.set(newBookingRef, {
           ...newBooking,
+          venueId: (selectedSlot as any).venueId || "default",
           slotId: selectedSlot.id,
           status: "confirmed",
           createdAt: serverTimestamp(),
         });
+        
       });
 
       setCurrentBooking(newBooking);
