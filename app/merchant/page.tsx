@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { onAuthStateChanged, signOut, User } from "firebase/auth";
@@ -9,6 +9,7 @@ import {
   addDoc,
   getDocs,
   getDoc,
+  deleteDoc,
   doc,
   query,
   where,
@@ -46,7 +47,7 @@ export default function MerchantPortal() {
   const [venueProfile, setVenueProfile] = useState<VenueProfile | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
-  // Πεδία φόρμας slot
+  // Φόρμα νέου slot
   const [startTime, setStartTime] = useState("18:00");
   const [endTime, setEndTime] = useState("20:00");
   const [discount, setDiscount] = useState("-30%");
@@ -55,17 +56,20 @@ export default function MerchantPortal() {
   const [activeSlots, setActiveSlots] = useState<Slot[]>([]);
   const [bookings, setBookings] = useState<BookingItem[]>([]);
   const [isSavingSlot, setIsSavingSlot] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<"all" | "confirmed" | "checked_in" | "cancelled">("all");
 
-  // 1. Προστασία διαδρομής & ανάκτηση προφίλ
   useEffect(() => {
+    let isMounted = true;
+
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (!user) {
         router.push("/merchant/login");
         return;
       }
+
+      if (!isMounted) return;
       setCurrentUser(user);
 
-      // Φόρτωση στοιχείων καταστήματος από το doc `venues/{uid}`
       try {
         const venueDoc = await getDoc(doc(db, "venues", user.uid));
         if (venueDoc.exists()) {
@@ -77,54 +81,80 @@ export default function MerchantPortal() {
             area: "Αθήνα",
           });
         }
+
+        // Φόρτωση κρατήσεων
+        const qBookings = query(
+          collection(db, "bookings"),
+          where("venueId", "==", user.uid)
+        );
+        const snapshotBookings = await getDocs(qBookings);
+        const bList: BookingItem[] = [];
+        snapshotBookings.forEach((d) => {
+          bList.push({ id: d.id, ...(d.data() as Omit<BookingItem, "id">) });
+        });
+
+        // Φόρτωση slots
+        const qSlots = query(
+          collection(db, "slots"),
+          where("venueId", "==", user.uid)
+        );
+        const snapshotSlots = await getDocs(qSlots);
+        const sList: Slot[] = [];
+        snapshotSlots.forEach((d) => {
+          sList.push({ id: d.id, ...(d.data() as Omit<Slot, "id">) });
+        });
+
+        if (isMounted) {
+          setBookings(bList);
+          setActiveSlots(sList);
+        }
       } catch (e) {
-        console.error("Σφάλμα φόρτωσης προφίλ:", e);
+        console.error("Σφάλμα ανάκτησης δεδομένων:", e);
       } finally {
-        setAuthLoading(false);
+        if (isMounted) {
+          setAuthLoading(false);
+        }
       }
     });
 
-    return () => unsubscribe();
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
   }, [router]);
 
-  // 2. Ανάκτηση κρατήσεων και slots του συνδεδεμένου καταστήματος
-  const fetchMerchantData = async (userUid: string) => {
-    try {
-      // Κρατήσεις για το συγκεκριμένο κατάστημα
-      const qBookings = query(
-        collection(db, "bookings"),
-        where("venueId", "==", userUid)
-      );
-      const snapshotBookings = await getDocs(qBookings);
-      const bList: BookingItem[] = [];
-      snapshotBookings.forEach((d) => {
-        bList.push({ id: d.id, ...(d.data() as Omit<BookingItem, "id">) });
-      });
-      setBookings(bList);
+  // Υπολογισμός Στατιστικών (KPIs)
+  const stats = useMemo(() => {
+    const totalBookings = bookings.length;
+    const checkedInBookings = bookings.filter((b) => b.status === "checked_in").length;
+    const cancelledBookings = bookings.filter((b) => b.status === "cancelled").length;
+    const activeBookings = bookings.filter((b) => b.status === "confirmed").length;
 
-      // Ενεργά slots του καταστήματος
-      const qSlots = query(
-        collection(db, "slots"),
-        where("venueId", "==", userUid)
-      );
-      const snapshotSlots = await getDocs(qSlots);
-      const sList: Slot[] = [];
-      snapshotSlots.forEach((d) => {
-        sList.push({ id: d.id, ...(d.data() as Omit<Slot, "id">) });
-      });
-      setActiveSlots(sList);
-    } catch (err) {
-      console.error("Σφάλμα ανάκτησης δεδομένων:", err);
-    }
-  };
+    const totalGuests = bookings
+      .filter((b) => b.status !== "cancelled")
+      .reduce((acc, curr) => acc + (curr.partySize || 0), 0);
 
-  useEffect(() => {
-    if (currentUser?.uid) {
-      fetchMerchantData(currentUser.uid);
-    }
-  }, [currentUser]);
+    const completionRate =
+      totalBookings - cancelledBookings > 0
+        ? Math.round((checkedInBookings / (totalBookings - cancelledBookings)) * 100)
+        : 0;
 
-  // 3. Προσθήκη slot συνδεδεμένου με το UID του καταστήματος
+    return {
+      totalBookings,
+      checkedInBookings,
+      cancelledBookings,
+      activeBookings,
+      totalGuests,
+      completionRate,
+    };
+  }, [bookings]);
+
+  // Φιλτραρισμένες κρατήσεις
+  const filteredBookings = useMemo(() => {
+    if (statusFilter === "all") return bookings;
+    return bookings.filter((b) => b.status === statusFilter);
+  }, [bookings, statusFilter]);
+
   const handleAddSlot = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser || !venueProfile) return;
@@ -156,6 +186,19 @@ export default function MerchantPortal() {
     }
   };
 
+  const handleDeleteSlot = async (slotId: string) => {
+    const confirmDelete = window.confirm("Είστε σίγουροι ότι θέλετε να διαγράψετε αυτό το slot;");
+    if (!confirmDelete) return;
+
+    try {
+      await deleteDoc(doc(db, "slots", slotId));
+      setActiveSlots((prev) => prev.filter((s) => s.id !== slotId));
+    } catch (err) {
+      console.error("Σφάλμα διαγραφής slot:", err);
+      alert("Αποτυχία διαγραφής slot.");
+    }
+  };
+
   const handleLogout = async () => {
     await signOut(auth);
     router.push("/merchant/login");
@@ -164,34 +207,33 @@ export default function MerchantPortal() {
   if (authLoading) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center text-sm">
-        Έλεγχος πρόσβασης...
+        Έλεγχος πρόσβασης & φόρτωση αναλυτικών...
       </div>
     );
   }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-6 md:p-10">
-      {/* Top Header */}
       <header className="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-4 pb-8 border-b border-slate-800">
         <div>
           <span className="text-xs font-bold uppercase tracking-widest text-amber-400">
-            Merchant Portal
+            Merchant Dashboard
           </span>
           <h1 className="text-3xl font-black text-white">{venueProfile?.name}</h1>
           <p className="text-xs text-slate-400">
-            {venueProfile?.category} • {venueProfile?.area} | Συνδεδεμένος ως: {currentUser?.email}
+            {venueProfile?.category} • {venueProfile?.area} | {currentUser?.email}
           </p>
         </div>
         <div className="flex gap-2">
           <Link
             href="/merchant/scan"
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-xs font-bold transition flex items-center gap-1"
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-xs font-bold transition flex items-center gap-1 text-white shadow-lg shadow-emerald-950"
           >
             📷 Check-In Scanner
           </Link>
           <Link
             href="/"
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold transition"
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold transition text-slate-200"
           >
             Αρχική
           </Link>
@@ -204,8 +246,37 @@ export default function MerchantPortal() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto py-8 grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Στήλη 1: Φόρμα Προσθήκης Slot */}
+      {/* Κάρτες Στατιστικών (KPIs) */}
+      <section className="max-w-6xl mx-auto py-8">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl">
+            <span className="text-xs text-slate-400 uppercase font-semibold">Συνολικες Κρατησεις</span>
+            <div className="text-2xl font-black text-white mt-1">{stats.totalBookings}</div>
+            <span className="text-[11px] text-amber-400 font-medium">{stats.activeBookings} ενεργές</span>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl">
+            <span className="text-xs text-slate-400 uppercase font-semibold">Check-Ins</span>
+            <div className="text-2xl font-black text-emerald-400 mt-1">{stats.checkedInBookings}</div>
+            <span className="text-[11px] text-slate-400">{stats.completionRate}% προσέλευση</span>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl">
+            <span className="text-xs text-slate-400 uppercase font-semibold">Συνολο Πελατων</span>
+            <div className="text-2xl font-black text-white mt-1">{stats.totalGuests}</div>
+            <span className="text-[11px] text-slate-400">άτομα που εξυπηρετήθηκαν</span>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl">
+            <span className="text-xs text-slate-400 uppercase font-semibold">Ακυρωσεις</span>
+            <div className="text-2xl font-black text-red-400 mt-1">{stats.cancelledBookings}</div>
+            <span className="text-[11px] text-slate-400">απελευθερωμένα τραπέζια</span>
+          </div>
+        </div>
+      </section>
+
+      <main className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {/* Στήλη 1: Ορισμός & Διαχείριση Slots */}
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-3xl shadow-xl space-y-6">
           <div>
             <h2 className="text-lg font-bold text-white">Ορισμός Happy Hour / Slot</h2>
@@ -275,82 +346,138 @@ export default function MerchantPortal() {
             </button>
           </form>
 
-          {/* Λίστα δημοσιευμένων slots */}
+          {/* Λίστα Slots με δυνατότητα Διαγραφής */}
           {activeSlots.length > 0 && (
             <div className="pt-4 border-t border-slate-800 space-y-2">
               <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                Ενεργά Slots Καταστήματος
+                Ενεργά Slots Καταστήματος ({activeSlots.length})
               </span>
               {activeSlots.map((s) => (
                 <div
                   key={s.id}
-                  className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex justify-between items-center text-xs"
+                  className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex justify-between items-center text-xs group"
                 >
                   <div>
                     <div className="font-bold text-white">{s.timeWindow}</div>
                     <div className="text-amber-400">{s.discount}</div>
+                    <div className="text-slate-400 text-[11px]">
+                      {s.availableTables} / {s.totalTables} τραπέζια
+                    </div>
                   </div>
-                  <span className="bg-slate-800 px-2.5 py-1 rounded-lg text-slate-300 font-medium">
-                    {s.availableTables} τραπέζια
-                  </span>
+                  <button
+                    onClick={() => handleDeleteSlot(s.id)}
+                    title="Διαγραφή slot"
+                    className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition"
+                  >
+                    🗑️
+                  </button>
                 </div>
               ))}
             </div>
           )}
         </div>
 
-        {/* Στήλη 2 & 3: Λίστα Κρατήσεων Πελατών */}
+        {/* Στήλη 2 & 3: Κρατήσεις & Φίλτρα */}
         <div className="lg:col-span-2 space-y-6">
-          <div className="flex justify-between items-center">
-            <h2 className="text-xl font-bold text-white">Κρατήσεις Πελατών</h2>
-            <span className="text-xs bg-slate-800 text-slate-300 px-3 py-1 rounded-full font-semibold">
-              Σύνολο: {bookings.length}
-            </span>
+          <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3">
+            <div>
+              <h2 className="text-xl font-bold text-white">Κρατήσεις Πελατών</h2>
+              <p className="text-xs text-slate-400">Παρακολούθηση σε πραγματικό χρόνο</p>
+            </div>
+
+            {/* Φίλτρα Κατάστασης */}
+            <div className="flex bg-slate-900 border border-slate-800 p-1 rounded-xl text-xs">
+              <button
+                onClick={() => setStatusFilter("all")}
+                className={`px-3 py-1.5 rounded-lg transition font-medium ${
+                  statusFilter === "all" ? "bg-amber-400 text-slate-950 font-bold" : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Όλες ({bookings.length})
+              </button>
+              <button
+                onClick={() => setStatusFilter("confirmed")}
+                className={`px-3 py-1.5 rounded-lg transition font-medium ${
+                  statusFilter === "confirmed" ? "bg-amber-400 text-slate-950 font-bold" : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Αναμονή ({stats.activeBookings})
+              </button>
+              <button
+                onClick={() => setStatusFilter("checked_in")}
+                className={`px-3 py-1.5 rounded-lg transition font-medium ${
+                  statusFilter === "checked_in" ? "bg-amber-400 text-slate-950 font-bold" : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Checked-In ({stats.checkedInBookings})
+              </button>
+              <button
+                onClick={() => setStatusFilter("cancelled")}
+                className={`px-3 py-1.5 rounded-lg transition font-medium ${
+                  statusFilter === "cancelled" ? "bg-amber-400 text-slate-950 font-bold" : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Ακυρώσεις ({stats.cancelledBookings})
+              </button>
+            </div>
           </div>
 
-          {bookings.length === 0 ? (
+          {filteredBookings.length === 0 ? (
             <div className="bg-slate-900 border border-slate-800 rounded-3xl p-12 text-center text-slate-500">
-              Δεν υπάρχουν ακόμη κρατήσεις για το κατάστημά σας.
+              Δεν υπάρχουν κρατήσεις για τη συγκεκριμένη κατηγορία.
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {bookings.map((b) => (
-                <div
-                  key={b.id}
-                  className="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex flex-col justify-between space-y-3"
-                >
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <span className="text-xs font-mono font-bold px-2.5 py-1 bg-amber-400/20 text-amber-300 rounded-lg">
-                        {b.ticketCode}
+              {filteredBookings.map((b) => {
+                const isChecked = b.status === "checked_in";
+                const isCancelled = b.status === "cancelled";
+
+                return (
+                  <div
+                    key={b.id}
+                    className={`bg-slate-900 border p-5 rounded-2xl flex flex-col justify-between space-y-3 transition ${
+                      isCancelled
+                        ? "border-red-900/30 opacity-60"
+                        : isChecked
+                        ? "border-emerald-500/30"
+                        : "border-slate-800"
+                    }`}
+                  >
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <span className="text-xs font-mono font-bold px-2.5 py-1 bg-amber-400/20 text-amber-300 rounded-lg">
+                          {b.ticketCode}
+                        </span>
+                        <div className="font-bold text-white text-base mt-2">
+                          {b.partySize} Άτομα
+                        </div>
+                      </div>
+                      <span
+                        className={`text-xs font-bold px-2.5 py-0.5 rounded ${
+                          isChecked
+                            ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                            : isCancelled
+                            ? "bg-red-500/10 text-red-400 border border-red-500/20"
+                            : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                        }`}
+                      >
+                        {isChecked ? "✓ Checked-In" : isCancelled ? "✕ Ακυρώθηκε" : "Αναμονή"}
                       </span>
-                      <div className="font-bold text-white text-base mt-2">
-                        {b.partySize} Άτομα
+                    </div>
+
+                    <div className="text-xs text-slate-400 border-t border-slate-800 pt-3 flex justify-between">
+                      <div>
+                        <span>Ώρα: </span>
+                        <strong className="text-slate-200">{b.timeWindow}</strong>
+                      </div>
+                      <div>
+                        <span>Έκπτωση: </span>
+                        <strong className="text-amber-400">{b.discount}</strong>
                       </div>
                     </div>
-                    <span
-                      className={`text-xs font-bold px-2.5 py-0.5 rounded ${
-                        b.status === "checked_in"
-                          ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                          : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
-                      }`}
-                    >
-                      {b.status === "checked_in" ? "✓ Checked-In" : "Αναμονή"}
-                    </span>
                   </div>
-
-                  <div className="text-xs text-slate-400 border-t border-slate-800 pt-3 flex justify-between">
-                    <div>
-                      <span>Ώρα: </span>
-                      <strong className="text-slate-200">{b.timeWindow}</strong>
-                    </div>
-                    <div>
-                      <span>Έκπτωση: </span>
-                      <strong className="text-amber-400">{b.discount}</strong>
-                    </div>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
