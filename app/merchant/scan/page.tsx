@@ -29,9 +29,8 @@ export default function TicketScannerPage() {
   const [isProcessing, setIsProcessing] = useState(false);
   const scannerRef = useRef<any>(null);
 
-  // Επικύρωση κωδικού ticket στη βάση Firestore
+  // Επικύρωση κράτησης στο Firestore
   const verifyAndCheckIn = async (codeToVerify: string) => {
-    if (!codeToVerify) return;
     setIsProcessing(true);
     setScanError(null);
 
@@ -74,27 +73,34 @@ export default function TicketScannerPage() {
     }
   };
 
-  // Αρχικοποίηση Scanner μόνο στο Client περιβάλλον
+  // Αρχικοποίηση κάμερας με προτίμηση στην πίσω κάμερα (environment)
   useEffect(() => {
-    let html5QrCodeScanner: any = null;
+    let html5QrcodeScanner: any = null;
 
     import("html5-qrcode").then(({ Html5QrcodeScanner }) => {
-      html5QrCodeScanner = new Html5QrcodeScanner(
+      html5QrcodeScanner = new Html5QrcodeScanner(
         "qr-reader",
-        { fps: 10, qrbox: { width: 250, height: 250 } },
+        {
+          fps: 10,
+          qrbox: { width: 250, height: 250 },
+          videoConstraints: {
+            // Επιλογή της πίσω κάμερας αντί για τη selfie
+            facingMode: { ideal: "environment" },
+          },
+        },
         false
       );
 
-      html5QrCodeScanner.render(
+      html5QrcodeScanner.render(
         (decodedText: string) => {
           verifyAndCheckIn(decodedText);
         },
         () => {
-          // Ignore scanning frames
+          // Αγνοούμε τα προσωρινά frame errors
         }
       );
 
-      scannerRef.current = html5QrCodeScanner;
+      scannerRef.current = html5QrcodeScanner;
     });
 
     return () => {
@@ -131,7 +137,7 @@ export default function TicketScannerPage() {
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl flex gap-2">
           <input
             type="text"
-            placeholder="ή γράψε κωδικό (π.χ. KOU-1234)"
+            placeholder="ή γράψε τον κωδικό (π.χ. KOU-1234)"
             value={manualCode}
             onChange={(e) => setManualCode(e.target.value.toUpperCase())}
             className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-400"
@@ -145,13 +151,14 @@ export default function TicketScannerPage() {
           </button>
         </div>
 
-        {/* Μηνύματα */}
+        {/* Μηνύματα σφάλματος */}
         {scanError && (
           <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-2xl text-red-400 text-sm text-center font-semibold">
             ✕ {scanError}
           </div>
         )}
 
+        {/* Επιτυχές Check-In */}
         {ticketData && (
           <div className="p-6 bg-slate-900 border-2 border-emerald-400 rounded-3xl shadow-2xl space-y-3">
             <div className="flex justify-between items-start">
