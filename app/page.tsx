@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
-import Image from "next/image";
+import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
 import {
   collection,
@@ -54,23 +54,25 @@ interface Booking {
 
 const VENUE_METADATA: Record<
   string,
-  { category: string; area: string; image: string; lat: number; lng: number }
+  { slug: string; category: string; area: string; image: string; lat: number; lng: number }
 > = {
   "Εστιατόριο ΚΟΥΚΟΥΤΣΗΣ": {
+    slug: "koukoutsis",
     category: "Παραδοσιακή Κουζίνα",
     area: "Κέντρο",
     image:
       "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=600&q=80",
     lat: 37.9753,
-    lng: 23.7361, // Σύνταγμα
+    lng: 23.7361,
   },
   "Cucina Bella": {
+    slug: "cucina-bella",
     category: "Ιταλικό & Wine Bar",
     area: "Γλυφάδα",
     image:
       "https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=600&q=80",
     lat: 37.8631,
-    lng: 23.7533, // Γλυφάδα
+    lng: 23.7533,
   },
 };
 
@@ -542,23 +544,28 @@ export default function Home() {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {filteredVenues.map((venue, index) => (
+            {filteredVenues.map((venue) => (
               <div key={venue.name} className="bg-neutral-900 rounded-3xl overflow-hidden border border-neutral-800 shadow-md">
                 <div className="relative w-full h-48">
-<div className="relative w-full h-48">
-  {/* eslint-disable-next-line @next/next/no-img-element */}
-  <img
-    src={venue.image}
-    alt={venue.name}
-    loading="eager"
-    decoding="async"
-    className="w-full h-full object-cover"
-  />
-</div>
+                  <div className="relative w-full h-48">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={venue.image}
+                      alt={venue.name}
+                      loading="eager"
+                      decoding="async"
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
                 </div>
                 <div className="p-6">
                   <div className="flex justify-between items-start mb-2">
-                    <h3 className="text-lg font-bold text-white">{venue.name}</h3>
+                    <Link
+                      href={`/venue/${(VENUE_METADATA[venue.name]?.slug) || "koukoutsis"}`}
+                      className="hover:text-amber-400 transition"
+                    >
+                      <h3 className="text-lg font-bold text-white">{venue.name} →</h3>
+                    </Link>
                     <span className="text-xs bg-neutral-800 text-neutral-300 px-2.5 py-1 rounded-md border border-neutral-700/50">
                       {venue.area}
                     </span>
