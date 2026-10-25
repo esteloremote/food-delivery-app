@@ -8,6 +8,8 @@ import {
   where,
   onSnapshot,
   doc,
+  getDoc,
+  getDocs,
   runTransaction,
   serverTimestamp,
 } from "firebase/firestore";
@@ -26,6 +28,7 @@ interface SlotDeal {
 interface VenueDetails {
   id: string;
   name: string;
+  slug: string;
   category: string;
   area: string;
   address: string;
@@ -36,57 +39,59 @@ interface VenueDetails {
   highlights: string[];
 }
 
-const VENUES_DB: Record<string, VenueDetails> = {
-  koukoutsis: {
-    id: "koukoutsis",
-    name: "Εστιατόριο ΚΟΥΚΟΥΤΣΗΣ",
-    category: "Παραδοσιακή Κουζίνα & Μεζέδες",
-    area: "Κέντρο (Σύνταγμα)",
-    address: "Μητροπόλεως 42, Αθήνα 105 63",
-    phone: "+30 210 3214567",
-    hours: "13:00 - 00:30 καθημερινά",
-    description:
-      "Αυθεντικές παραδοσιακές ελληνικές γεύσεις με επιλεγμένα τοπικά προϊόντα, εξαιρετικά μαγειρευτά και ζεστή φιλοξενία στην καρδιά της Αθήνας.",
-    image:
-      "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=80",
-    highlights: ["Μοσχαράκι Κοκκινιστό", "Χειροποίητη Τυρόπιτα", "Φρέσκες Σαλάτες Εποχής"],
-  },
-  "cucina-bella": {
-    id: "cucina-bella",
-    name: "Cucina Bella",
-    category: "Ιταλικό & Wine Bar",
-    area: "Γλυφάδα",
-    address: "Λεωφ. Ποσειδώνος 85, Γλυφάδα 166 74",
-    phone: "+30 210 8943210",
-    hours: "18:00 - 01:00 (Τρ - Κυρ)",
-    description:
-      "Αυθεντική ναπολιτάνικη πίτσα σε ξυλόφουρνο, φρέσκα ζυμαρικά ημέρας και εκλεκτή λίστα ιταλικών και ελληνικών κρασιών με θέα την παραλιακή.",
-    image:
-      "https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=1200&q=80",
-    highlights: ["Pizza Margherita D.O.P.", "Truffle Tagliolini", "Tiramisu della Casa"],
-  },
-};
-
 export default function VenueProfilePage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
   const resolvedParams = use(params);
-  const venueId = resolvedParams.id;
-  const venue = VENUES_DB[venueId] || VENUES_DB["koukoutsis"];
+  const venueIdOrSlug = resolvedParams.id;
 
+  const [venue, setVenue] = useState<VenueDetails | null>(null);
+  const [venueLoading, setVenueLoading] = useState(true);
   const [slots, setSlots] = useState<SlotDeal[]>([]);
   const [selectedSlot, setSelectedSlot] = useState<SlotDeal | null>(null);
   const [partySize, setPartySize] = useState(2);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [bookingSuccessCode, setBookingSuccessCode] = useState<string | null>(null);
 
+  // Ανάκτηση στοιχείων καταστήματος από Firestore
   useEffect(() => {
-    const q = query(
-      collection(db, "slots"),
-      where("venueName", "==", venue.name)
-    );
+    const fetchVenue = async () => {
+      setVenueLoading(true);
+      try {
+        // 1. Δοκιμή με Document ID
+        const docRef = doc(db, "venues", venueIdOrSlug);
+        const docSnap = await getDoc(docRef);
+
+        if (docSnap.exists()) {
+          setVenue({ id: docSnap.id, ...(docSnap.data() as Omit<VenueDetails, "id">) });
+        } else {
+          // 2. Εναλλακτική αναζήτηση με βάση το slug
+          const qSlug = query(collection(db, "venues"), where("slug", "==", venueIdOrSlug));
+          const querySnap = await getDocs(qSlug);
+          if (!querySnap.empty) {
+            const firstDoc = querySnap.docs[0];
+            setVenue({ id: firstDoc.id, ...(firstDoc.data() as Omit<VenueDetails, "id">) });
+          } else {
+            setVenue(null);
+          }
+        }
+      } catch (err) {
+        console.error("Σφάλμα φόρτωσης καταστήματος:", err);
+      } finally {
+        setVenueLoading(false);
+      }
+    };
+
+    fetchVenue();
+  }, [venueIdOrSlug]);
+
+  // Real-time συγχρονισμός των slots του συγκεκριμένου μαγαζιού
+  useEffect(() => {
+    if (!venue) return;
+
+    const q = query(collection(db, "slots"), where("venueName", "==", venue.name));
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const list: SlotDeal[] = [];
@@ -97,10 +102,10 @@ export default function VenueProfilePage({
     });
 
     return () => unsubscribe();
-  }, [venue.name]);
+  }, [venue]);
 
   const handleBooking = async () => {
-    if (!selectedSlot || selectedSlot.availableTables <= 0) return;
+    if (!venue || !selectedSlot || selectedSlot.availableTables <= 0) return;
     setIsSubmitting(true);
 
     const cleanPrefix = venue.name.substring(0, 3).toUpperCase();
@@ -130,7 +135,7 @@ export default function VenueProfilePage({
           discount: selectedSlot.discount,
           partySize,
           date: todayDate,
-          venueId: selectedSlot.venueId || "default",
+          venueId: venue.id,
           slotId: selectedSlot.id,
           status: "confirmed",
           createdAt: serverTimestamp(),
@@ -153,13 +158,38 @@ export default function VenueProfilePage({
     }
   };
 
+  if (venueLoading) {
+    return (
+      <div className="min-h-screen bg-neutral-950 text-neutral-400 flex items-center justify-center text-sm">
+        Φόρτωση καταστήματος...
+      </div>
+    );
+  }
+
+  if (!venue) {
+    return (
+      <div className="min-h-screen bg-neutral-950 text-white flex flex-col items-center justify-center p-6 space-y-4">
+        <h1 className="text-2xl font-bold">Το κατάστημα δεν βρέθηκε</h1>
+        <p className="text-neutral-400 text-sm">
+          Το κατάστημα που αναζητάτε δεν υπάρχει ή έχει αφαιρεθεί.
+        </p>
+        <Link
+          href="/"
+          className="px-4 py-2 bg-amber-400 text-neutral-950 rounded-xl text-xs font-bold"
+        >
+          ← Επιστροφή στην Αρχική
+        </Link>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 pb-16">
       {/* Cover Image */}
       <div className="relative w-full h-72 md:h-96">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={venue.image}
+          src={venue.image || "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=80"}
           alt={venue.name}
           className="w-full h-full object-cover"
         />
@@ -203,9 +233,11 @@ export default function VenueProfilePage({
             </a>
           </div>
 
-          <p className="text-sm text-neutral-300 leading-relaxed pt-2 border-t border-neutral-800/80">
-            {venue.description}
-          </p>
+          {venue.description && (
+            <p className="text-sm text-neutral-300 leading-relaxed pt-2 border-t border-neutral-800/80">
+              {venue.description}
+            </p>
+          )}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-neutral-800/80 text-xs text-neutral-400">
             <div>
@@ -285,22 +317,24 @@ export default function VenueProfilePage({
         </section>
 
         {/* Highlights / Πιάτα */}
-        <section className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl space-y-3">
-          <h3 className="text-base font-bold text-white">Δημοφιλή Πιάτα & Επιλογές</h3>
-          <div className="flex flex-wrap gap-2 pt-1">
-            {venue.highlights.map((item) => (
-              <span
-                key={item}
-                className="px-3 py-1.5 bg-neutral-950 border border-neutral-800 text-xs font-medium text-neutral-300 rounded-xl"
-              >
-                🍴 {item}
-              </span>
-            ))}
-          </div>
-        </section>
+        {venue.highlights && venue.highlights.length > 0 && (
+          <section className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl space-y-3">
+            <h3 className="text-base font-bold text-white">Δημοφιλή Πιάτα & Επιλογές</h3>
+            <div className="flex flex-wrap gap-2 pt-1">
+              {venue.highlights.map((item) => (
+                <span
+                  key={item}
+                  className="px-3 py-1.5 bg-neutral-950 border border-neutral-800 text-xs font-medium text-neutral-300 rounded-xl"
+                >
+                  🍴 {item}
+                </span>
+              ))}
+            </div>
+          </section>
+        )}
       </main>
 
-      {/* Pop-up Επιβεβαίωσης */}
+      {/* Modal Κράτησης */}
       {selectedSlot && (
         <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
           <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl max-w-sm w-full space-y-4 shadow-2xl">

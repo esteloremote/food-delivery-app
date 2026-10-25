@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
+import { onAuthStateChanged, signOut, User } from "firebase/auth";
 import {
   collection,
   onSnapshot,
@@ -11,9 +12,8 @@ import {
   runTransaction,
   serverTimestamp,
 } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { auth, db } from "@/lib/firebase";
 
-// Dynamic import του χάρτη χωρίς SSR
 const VenueMap = dynamic(() => import("@/components/VenueMap"), {
   ssr: false,
   loading: () => (
@@ -33,13 +33,19 @@ interface SlotDeal {
   totalTables: number;
 }
 
-interface VenueData {
+interface VenueDoc {
+  id: string;
+  slug: string;
   name: string;
   category: string;
   area: string;
+  address: string;
   image: string;
   lat: number;
   lng: number;
+}
+
+interface VenueWithSlots extends VenueDoc {
   slots: SlotDeal[];
 }
 
@@ -51,30 +57,6 @@ interface Booking {
   partySize: number;
   date: string;
 }
-
-const VENUE_METADATA: Record<
-  string,
-  { slug: string; category: string; area: string; image: string; lat: number; lng: number }
-> = {
-  "Εστιατόριο ΚΟΥΚΟΥΤΣΗΣ": {
-    slug: "koukoutsis",
-    category: "Παραδοσιακή Κουζίνα",
-    area: "Κέντρο",
-    image:
-      "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=600&q=80",
-    lat: 37.9753,
-    lng: 23.7361,
-  },
-  "Cucina Bella": {
-    slug: "cucina-bella",
-    category: "Ιταλικό & Wine Bar",
-    area: "Γλυφάδα",
-    image:
-      "https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=600&q=80",
-    lat: 37.8631,
-    lng: 23.7533,
-  },
-};
 
 function useCountdown(timeWindow: string) {
   const [timeLeft, setTimeLeft] = useState<{ label: string; isExpired: boolean }>({
@@ -177,78 +159,91 @@ function SlotItem({
 }
 
 export default function Home() {
-  const [venues, setVenues] = useState<VenueData[]>([]);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+
+  const [venueList, setVenueList] = useState<VenueDoc[]>([]);
+  const [slotList, setSlotList] = useState<SlotDeal[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedVenueName, setSelectedVenueName] = useState<string | null>(null);
+
+  const [selectedVenue, setSelectedVenue] = useState<VenueDoc | null>(null);
   const [selectedSlot, setSelectedSlot] = useState<SlotDeal | null>(null);
   const [partySize, setPartySize] = useState(2);
   const [currentBooking, setCurrentBooking] = useState<Booking | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // States για αναζήτηση, φίλτρα και προβολή χάρτη
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedArea, setSelectedArea] = useState("all");
   const [minDiscount, setMinDiscount] = useState<number>(0);
   const [showMap, setShowMap] = useState(false);
 
+  // 1. Παρακολούθηση Auth
   useEffect(() => {
-    const unsubscribe = onSnapshot(
-      collection(db, "slots"),
-      (snapshot) => {
-        const slotsList: SlotDeal[] = [];
-        snapshot.forEach((docSnap) => {
-          slotsList.push({
-            id: docSnap.id,
-            ...(docSnap.data() as Omit<SlotDeal, "id">),
-          });
-        });
-
-        const groupedVenues: Record<string, VenueData> = {};
-
-        Object.keys(VENUE_METADATA).forEach((name) => {
-          groupedVenues[name] = {
-            name,
-            ...VENUE_METADATA[name],
-            slots: [],
-          };
-        });
-
-        slotsList.forEach((slot) => {
-          const vName = slot.venueName || "Εστιατόριο ΚΟΥΚΟΥΤΣΗΣ";
-          if (!groupedVenues[vName]) {
-            groupedVenues[vName] = {
-              name: vName,
-              category: "Εστιατόριο",
-              area: "Κέντρο",
-              image:
-                "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=600&q=80",
-              lat: 37.9753,
-              lng: 23.7361,
-              slots: [],
-            };
-          }
-          groupedVenues[vName].slots.push(slot);
-        });
-
-        setVenues(Object.values(groupedVenues));
-        setLoading(false);
-      },
-      (error) => {
-        console.error("Σφάλμα φόρτωσης slots:", error);
-        setLoading(false);
-      }
-    );
-
-    return () => unsubscribe();
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+    });
+    return () => unsubAuth();
   }, []);
+
+  // 2. Real-time Subscription Venues (με ανάκτηση και του address)
+  useEffect(() => {
+    const unsubVenues = onSnapshot(collection(db, "venues"), (snap) => {
+      const vArr: VenueDoc[] = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        vArr.push({
+          id: d.id,
+          slug: data.slug || d.id,
+          name: data.name || "Κατάστημα",
+          category: data.category || "Εστίαση",
+          area: data.area || "Αθήνα",
+          address: data.address || "",
+          image:
+            data.image ||
+            "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=600&q=80",
+          lat: Number(data.lat) || 37.9753,
+          lng: Number(data.lng) || 23.7361,
+        });
+      });
+      setVenueList(vArr);
+      setLoading(false);
+    });
+
+    return () => unsubVenues();
+  }, []);
+
+  // 3. Real-time Subscription Slots
+  useEffect(() => {
+    const unsubSlots = onSnapshot(collection(db, "slots"), (snap) => {
+      const sArr: SlotDeal[] = [];
+      snap.forEach((d) => {
+        sArr.push({ id: d.id, ...(d.data() as Omit<SlotDeal, "id">) });
+      });
+      setSlotList(sArr);
+    });
+
+    return () => unsubSlots();
+  }, []);
+
+  // 4. Σύνδεση Venues με τα αντίστοιχα Slots τους
+  const fullVenues: VenueWithSlots[] = useMemo(() => {
+    return venueList.map((v) => {
+      const matchedSlots = slotList.filter(
+        (s) => s.venueName === v.name || s.venueId === v.id
+      );
+      return {
+        ...v,
+        slots: matchedSlots,
+      };
+    });
+  }, [venueList, slotList]);
 
   const availableAreas = useMemo(() => {
     const areas = new Set<string>();
-    venues.forEach((v) => {
+    venueList.forEach((v) => {
       if (v.area) areas.add(v.area);
     });
     return Array.from(areas);
-  }, [venues]);
+  }, [venueList]);
 
   const extractDiscountNumber = (discountStr: string): number => {
     const match = discountStr.match(/\d+/);
@@ -256,7 +251,7 @@ export default function Home() {
   };
 
   const filteredVenues = useMemo(() => {
-    return venues
+    return fullVenues
       .map((venue) => {
         const matchedSlots = venue.slots.filter((slot) => {
           if (minDiscount === 0) return true;
@@ -274,15 +269,16 @@ export default function Home() {
           venue.category.toLowerCase().includes(searchTerm.toLowerCase());
 
         const matchesArea =
-          selectedArea === "all" || venue.area.toLowerCase() === selectedArea.toLowerCase();
+          selectedArea === "all" ||
+          venue.area.toLowerCase() === selectedArea.toLowerCase();
 
         const matchesDiscount = minDiscount === 0 || venue.slots.length > 0;
 
         return matchesSearch && matchesArea && matchesDiscount;
       });
-  }, [venues, searchTerm, selectedArea, minDiscount]);
+  }, [fullVenues, searchTerm, selectedArea, minDiscount]);
 
-  // Μετατροπή των φιλτραρισμένων καταστημάτων για το Leaflet
+  // Πέρασμα όλων των στοιχείων (συμπεριλαμβανομένου του address) στον χάρτη
   const mapVenuesData = useMemo(() => {
     return filteredVenues.map((v) => {
       const bestDiscount = v.slots.length > 0 ? v.slots[0].discount : "-20%";
@@ -290,6 +286,7 @@ export default function Home() {
         name: v.name,
         category: v.category,
         area: v.area,
+        address: v.address || v.area,
         lat: v.lat,
         lng: v.lng,
         bestDiscount,
@@ -317,22 +314,22 @@ export default function Home() {
   };
 
   const handleBooking = async () => {
-    if (!selectedVenueName || !selectedSlot) return;
+    if (!selectedVenue || !selectedSlot) return;
 
     if (selectedSlot.availableTables <= 0) {
-      alert("Δυστυχώς εξαντλήθηκαν τα τραπέζια για αυτή τη χρονοθυρίδα!");
+      alert("Δυστυχώς εξαντλήθηκαν τα τραπέζια!");
       return;
     }
 
     setIsSubmitting(true);
 
-    const cleanPrefix = selectedVenueName.substring(0, 3).toUpperCase();
+    const cleanPrefix = selectedVenue.name.substring(0, 3).toUpperCase();
     const code = `${cleanPrefix}-${Math.floor(1000 + Math.random() * 9000)}`;
     const todayDate = new Date().toLocaleDateString("el-GR");
 
     const newBooking: Booking = {
       ticketCode: code,
-      venueName: selectedVenueName,
+      venueName: selectedVenue.name,
       timeWindow: selectedSlot.timeWindow,
       discount: selectedSlot.discount,
       partySize,
@@ -346,14 +343,10 @@ export default function Home() {
 
       await runTransaction(db, async (transaction) => {
         const slotSnap = await transaction.get(slotRef);
-        if (!slotSnap.exists()) {
-          throw new Error("Το slot δεν υπάρχει πλέον!");
-        }
+        if (!slotSnap.exists()) throw new Error("Το slot δεν υπάρχει πλέον!");
 
         const currentTables = slotSnap.data().availableTables ?? 0;
-        if (currentTables <= 0) {
-          throw new Error("Εξαντλήθηκαν τα τραπέζια!");
-        }
+        if (currentTables <= 0) throw new Error("Εξαντλήθηκαν τα τραπέζια!");
 
         transaction.update(slotRef, {
           availableTables: currentTables - 1,
@@ -361,9 +354,15 @@ export default function Home() {
 
         transaction.set(newBookingRef, {
           ...newBooking,
-          venueId: selectedSlot.venueId || "default",
+          venueId: selectedVenue.id,
           slotId: selectedSlot.id,
           status: "confirmed",
+          // Σύνδεση με τον πελάτη
+          customerId: currentUser ? currentUser.uid : "guest",
+          customerEmail: currentUser ? currentUser.email : null,
+          customerName: currentUser
+            ? currentUser.displayName || currentUser.email
+            : "Επισκέπτης",
           createdAt: serverTimestamp(),
         });
       });
@@ -380,8 +379,8 @@ export default function Home() {
       setCurrentBooking(newBooking);
       setSelectedSlot(null);
     } catch (error) {
-      console.error("Σφάλμα κράτησης:", error);
-      const msg = error instanceof Error ? error.message : "Παρουσιάστηκε σφάλμα κατά την κράτηση.";
+      console.error(error);
+      const msg = error instanceof Error ? error.message : "Σφάλμα κράτησης.";
       alert(msg);
     } finally {
       setIsSubmitting(false);
@@ -393,21 +392,46 @@ export default function Home() {
       <header className="max-w-5xl mx-auto flex items-center justify-between pb-6 border-b border-neutral-800">
         <div>
           <h1 className="text-2xl font-black text-amber-400">HappySeats</h1>
-          <p className="text-xs text-neutral-400">Κλείσε τραπέζι τις σωστές ώρες, κέρδισε έκπτωση</p>
+          <p className="text-xs text-neutral-400">
+            Κλείσε τραπέζι τις σωστές ώρες, κέρδισε έκπτωση
+          </p>
         </div>
-        <div className="flex gap-2">
-          <a
+
+        <div className="flex items-center gap-2">
+          <Link
             href="/my-tickets"
             className="text-xs font-semibold px-3 py-2 bg-neutral-900 hover:bg-neutral-800 text-white rounded-xl transition border border-neutral-800 flex items-center gap-1"
           >
             🎟️ Τα Εισιτήριά μου
-          </a>
-          <a
+          </Link>
+
+          {currentUser ? (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-neutral-400 hidden sm:inline">
+                👤 {currentUser.displayName || currentUser.email?.split("@")[0]}
+              </span>
+              <button
+                onClick={() => signOut(auth)}
+                className="text-xs px-2.5 py-2 bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-white rounded-xl transition border border-neutral-800"
+              >
+                Έξοδος
+              </button>
+            </div>
+          ) : (
+            <Link
+              href="/login"
+              className="text-xs font-bold px-3 py-2 bg-amber-400 hover:bg-amber-300 text-neutral-950 rounded-xl transition shadow"
+            >
+              Σύνδεση
+            </Link>
+          )}
+
+          <Link
             href="/merchant"
-            className="text-xs font-semibold px-3 py-2 bg-neutral-900 hover:bg-neutral-800 text-amber-300 rounded-xl transition border border-neutral-800"
+            className="text-xs font-semibold px-3 py-2 bg-neutral-900 hover:bg-neutral-800 text-amber-300 rounded-xl transition border border-neutral-800 hidden md:inline-block"
           >
-            Είσοδος Καταστήματος →
-          </a>
+            Για Εστιατόρια →
+          </Link>
         </div>
       </header>
 
@@ -424,9 +448,6 @@ export default function Home() {
               </p>
               <p className="text-neutral-300 text-sm">
                 Άτομα: <span className="font-semibold text-white">{currentBooking.partySize}</span> | Προσφορά: <span className="text-amber-400 font-bold">{currentBooking.discount}</span>
-              </p>
-              <p className="text-xs text-neutral-400 pt-2">
-                Δείξε αυτό το QR code κατά την άφιξή σου στην υποδοχή.
               </p>
               <div className="pt-2">
                 <button
@@ -527,7 +548,6 @@ export default function Home() {
           </div>
         </section>
 
-        {/* Προβολή Διαδραστικού Χάρτη */}
         {showMap && <VenueMap venues={mapVenuesData} />}
 
         <h2 className="text-xl font-bold mb-6">Διαθέσιμες Προσφορές Σήμερα</h2>
@@ -536,32 +556,33 @@ export default function Home() {
           <div className="text-center py-20 text-neutral-500 text-sm">Φόρτωση προσφορών...</div>
         ) : filteredVenues.length === 0 ? (
           <div className="bg-neutral-900 border border-neutral-800 p-12 rounded-3xl text-center space-y-3">
-            <span className="text-3xl">🔍</span>
-            <h3 className="font-bold text-white text-base">Δεν βρέθηκαν αποτελέσματα</h3>
-            <p className="text-xs text-neutral-400">
-              Δοκιμάστε να αλλάξετε την αναζήτηση ή τα φίλτρα περιοχής και έκπτωσης.
+            <span className="text-3xl">🍽️</span>
+            <h3 className="font-bold text-white text-base">Δεν βρέθηκαν διαθέσιμες προσφορές</h3>
+            <p className="text-xs text-neutral-400 max-w-sm mx-auto">
+              Αυτή τη στιγμή δεν υπάρχουν ενεργά happy hour τραπέζια για τα κριτήρια που επιλέξατε. Δοκιμάστε να καθαρίσετε τα φίλτρα ή ελέγξτε ξανά σε λίγο!
             </p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {filteredVenues.map((venue) => (
-              <div key={venue.name} className="bg-neutral-900 rounded-3xl overflow-hidden border border-neutral-800 shadow-md">
+              <div
+                key={venue.id}
+                className="bg-neutral-900 rounded-3xl overflow-hidden border border-neutral-800 shadow-md"
+              >
                 <div className="relative w-full h-48">
-                  <div className="relative w-full h-48">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={venue.image}
-                      alt={venue.name}
-                      loading="eager"
-                      decoding="async"
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={venue.image}
+                    alt={venue.name}
+                    loading="eager"
+                    decoding="async"
+                    className="w-full h-full object-cover"
+                  />
                 </div>
                 <div className="p-6">
                   <div className="flex justify-between items-start mb-2">
                     <Link
-                      href={`/venue/${(VENUE_METADATA[venue.name]?.slug) || "koukoutsis"}`}
+                      href={`/venue/${venue.slug}`}
                       className="hover:text-amber-400 transition"
                     >
                       <h3 className="text-lg font-bold text-white">{venue.name} →</h3>
@@ -579,7 +600,7 @@ export default function Home() {
 
                     {venue.slots.length === 0 ? (
                       <p className="text-xs text-neutral-500 py-3 italic">
-                        Δεν υπάρχουν ενεργά happy hour slots που να ταιριάζουν στα κριτήρια.
+                        Δεν υπάρχουν ενεργές χρονοθυρίδες αυτή τη στιγμή.
                       </p>
                     ) : (
                       venue.slots.map((slot) => (
@@ -587,7 +608,7 @@ export default function Home() {
                           key={slot.id}
                           slot={slot}
                           onSelect={() => {
-                            setSelectedVenueName(venue.name);
+                            setSelectedVenue(venue);
                             setSelectedSlot(slot);
                           }}
                         />
@@ -602,12 +623,12 @@ export default function Home() {
       </main>
 
       {/* Pop-up Επιβεβαίωσης */}
-      {selectedSlot && selectedVenueName && (
+      {selectedSlot && selectedVenue && (
         <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
           <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl max-w-sm w-full space-y-4 shadow-2xl">
             <h3 className="font-bold text-lg text-white">Επιβεβαίωση Κράτησης</h3>
             <p className="text-sm text-neutral-300">
-              {selectedVenueName} ({selectedSlot.timeWindow})
+              {selectedVenue.name} ({selectedSlot.timeWindow})
             </p>
             <div className="text-xs text-amber-400 font-semibold">{selectedSlot.discount}</div>
 

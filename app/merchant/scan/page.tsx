@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { onAuthStateChanged } from "firebase/auth";
 import {
   collection,
   query,
@@ -10,7 +12,7 @@ import {
   updateDoc,
   doc,
 } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { auth, db } from "@/lib/firebase";
 
 interface ScannedTicket {
   id: string;
@@ -32,11 +34,25 @@ interface ScannerInstance {
 }
 
 export default function TicketScannerPage() {
+  const router = useRouter();
+  const [authChecking, setAuthChecking] = useState(true);
   const [ticketData, setTicketData] = useState<ScannedTicket | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
   const [manualCode, setManualCode] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const scannerRef = useRef<ScannerInstance | null>(null);
+
+  // Έλεγχος Auth
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (!user) {
+        router.push("/merchant/login");
+      } else {
+        setAuthChecking(false);
+      }
+    });
+    return () => unsub();
+  }, [router]);
 
   // Ήχος Beep επιτυχίας
   const playSuccessSound = () => {
@@ -118,13 +134,14 @@ export default function TicketScannerPage() {
     }
   }, []);
 
-  // Ref για ασφαλή κλήση μέσα στο scanner callback χωρίς re-trigger του effect
   const verifyRef = useRef(verifyAndCheckIn);
   useEffect(() => {
     verifyRef.current = verifyAndCheckIn;
   }, [verifyAndCheckIn]);
 
   useEffect(() => {
+    if (authChecking) return;
+
     let isMounted = true;
 
     const container = document.getElementById("qr-reader");
@@ -174,7 +191,15 @@ export default function TicketScannerPage() {
         el.innerHTML = "";
       }
     };
-  }, []);
+  }, [authChecking]);
+
+  if (authChecking) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center text-sm">
+        Έλεγχος πρόσβασης...
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-6 flex flex-col items-center">
