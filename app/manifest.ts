@@ -7,8 +7,8 @@ export default function manifest(): MetadataRoute.Manifest {
     description: "Κλείσε τραπέζι τις σωστές ώρες, κέρδισε έκπτωση",
     start_url: "/",
     display: "standalone",
-    background_color: "#0a0a0a",
-    theme_color: "#f59e0b",
+    background_color: "#fafafa",
+    theme_color: "#f97316",
     icons: [
       {
         src: "/icon.svg",

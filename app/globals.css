@@ -1,26 +1,122 @@
 @import "tailwindcss";
 
+/* ========================================================
+   THEME CONFIGURATION
+   Αλλάζεις ΜΟΝΟ τις τιμές εδώ για να αλλάξει όλη η εφαρμογή!
+   ======================================================== */
+
+/* :root { */
+  
+  /* --brand-primary: #f97316;       Βασικό πορτοκαλί (κουμπιά, active) */
+  /* --brand-hover: #ea580c;         Hover κατάσταση */
+  /* --brand-light: #fff7ed;         Απαλό φόντο για tags / badges */
+  /* --brand-border: #fed7aa;        Περίγραμμα για tags / badges */
+  /* --brand-text: #c2410c;          Έντονο κείμενο για badges / εκπτώσεις */
+
+  /* 2. Επιφάνειες & Φόντο (Light surfaces) */
+  /* --bg-page: #fafafa;             Γενικό φόντο σελίδας */
+  /* --bg-card: #ffffff;             Φόντο καρτών / modals / header */
+  /* --bg-subtle: #f5f5f5;           Φόντο inputs, drop-downs, δευτερευόντων κουμπιών */
+  /* --border-color: #e5e5e5;        Βασικά περιγράμματα καρτών & διαχωριστικών */
+  /* --border-focus: #f97316;        Περίγραμμα όταν εστιάζει ο χρήστης σε input */
+
+  /* 3. Τυπογραφία */
+  /* --text-primary: #171717;        Κύριοι τίτλοι & κείμενα */
+  /* --text-muted: #737373;          Δευτερεύοντα κείμενα, labels, ώρες */
+/* } */
+
+/* Brand Accent (Πορτοκαλί) */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  
+  --brand-primary: #f97316;       
+  --brand-hover: #ea580c;        
+  --brand-light: #fff7ed;        
+  --brand-border: #fed7aa;       
+  --brand-text: #c2410c;          
+
+  --bg-page: #fafafa;             
+  --bg-card: #ffffff;            
+  --bg-subtle: #f5f5f5;          
+  --border-color: #e5e5e5;     
+  --border-focus: #f97316;        
+
+  --text-primary: #171717;     
+  --text-muted: #737373;     
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+/* Emerald Green & White (Fresh & Organic) */
+/* :root {
+  --brand-primary: #10b981;
+  --brand-hover: #059669;
+  --brand-light: #ecfdf5;
+  --brand-border: #a7f3d0;
+  --brand-text: #047857;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --bg-page: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-subtle: #f1f5f9;
+  --border-color: #e2e8f0;
+  --border-focus: #10b981;
+
+  --text-primary: #0f172a;
+  --text-muted: #64748b;
+} */
+
+/* Royal Blue & White (Tech & Premium) */
+/* :root {
+  --brand-primary: #2563eb;
+  --brand-hover: #1d4ed8;
+  --brand-light: #eff6ff;
+  --brand-border: #bfdbfe;
+  --brand-text: #1d4ed8;
+
+  --bg-page: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-subtle: #f1f5f9;
+  --border-color: #e2e8f0;
+  --border-focus: #2563eb;
+
+  --text-primary: #0f172a;
+  --text-muted: #64748b;
+} */
+
+/* Επιστροφή σε Dark Theme (Dark Slate & Amber Gold) */
+/* :root {
+  --brand-primary: #f59e0b;
+  --brand-hover: #d97706;
+  --brand-light: rgba(245, 158, 11, 0.15);
+  --brand-border: rgba(245, 158, 11, 0.3);
+  --brand-text: #fbbf24;
+
+  --bg-page: #020617;
+  --bg-card: #0f172a;
+  --bg-subtle: #1e293b;
+  --border-color: #1e293b;
+  --border-focus: #f59e0b;
+
+  --text-primary: #f8fafc;
+  --text-muted: #94a3b8;
+} */
+
+/* Σύνδεση με το Tailwind Theme Engine */
+@theme {
+  --color-brand: var(--brand-primary);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-light: var(--brand-light);
+  --color-brand-border: var(--brand-border);
+  --color-brand-text: var(--brand-text);
+
+  --color-surface: var(--bg-page);
+  --color-card: var(--bg-card);
+  --color-subtle: var(--bg-subtle);
+  --color-border-theme: var(--border-color);
+
+  --color-text-main: var(--text-primary);
+  --color-text-muted: var(--text-muted);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background-color: var(--bg-page);
+  color: var(--text-primary);
   font-family: Arial, Helvetica, sans-serif;
 }

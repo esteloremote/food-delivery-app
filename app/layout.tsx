@@ -1,4 +1,4 @@
-import type { Metadata, Viewport } from "next";
+import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -12,26 +12,9 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-export const viewport: Viewport = {
-  themeColor: "#0a0a0a",
-  width: "device-width",
-  initialScale: 1,
-  maximumScale: 1,
-};
-
 export const metadata: Metadata = {
-  title: "HappySeats - Yield Dining Deals",
-  description: "Κράτηση θέσεων σε happy hours με εκπτώσεις",
-  manifest: "/manifest.webmanifest",
-  icons: {
-    icon: "/icon.svg",
-    apple: "/icon.svg",
-  },
-  appleWebApp: {
-    capable: true,
-    statusBarStyle: "black-translucent",
-    title: "HappySeats",
-  },
+  title: "HappySeats - Happy Hour Dining & Deals",
+  description: "Κλείσε τραπέζι τις σωστές ώρες, κέρδισε έκπτωση έως και 50%",
 };
 
 export default function RootLayout({
@@ -42,11 +25,10 @@ export default function RootLayout({
   return (
     <html lang="el">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-neutral-950 text-neutral-100`}
+        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-surface text-text-main min-h-screen`}
       >
         {children}
       </body>
     </html>
   );
-};
-
+}

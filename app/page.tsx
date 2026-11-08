@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState, useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -10,8 +11,10 @@ import {
   onSnapshot,
   doc,
   runTransaction,
-  updateDoc,
   serverTimestamp,
+  query,
+  where,
+  getDocs,
 } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import type { TableStatus } from "@/components/VenueMap";
@@ -19,7 +22,7 @@ import type { TableStatus } from "@/components/VenueMap";
 const VenueMap = dynamic(() => import("@/components/VenueMap"), {
   ssr: false,
   loading: () => (
-    <div className="w-full h-80 bg-neutral-900 rounded-3xl border border-neutral-800 flex items-center justify-center text-xs text-neutral-500 my-6">
+    <div className="w-full h-80 bg-subtle rounded-3xl border border-border-theme flex items-center justify-center text-xs text-text-muted my-6">
       Φόρτωση χάρτη...
     </div>
   ),
@@ -54,8 +57,7 @@ interface VenueDoc {
   image: string;
   lat: number;
   lng: number;
-  // --- ΝΕΑ ΠΕΔΙΑ (2, 4, 6, 7) ---
-  tableStatus: TableStatus; // "plenty" | "few" | "full"
+  tableStatus: TableStatus;
   takeawayReady: boolean;
   panicDealActive: boolean;
   panicDealText: string;
@@ -140,29 +142,29 @@ function SlotItem({
 
   return (
     <div
-      className={`p-3 rounded-xl border flex items-center justify-between transition ${
+      className={`p-3 rounded-2xl border flex items-center justify-between transition ${
         slot.isPanicSlot
-          ? "bg-red-950/30 border-red-500/40"
+          ? "bg-red-50 border-red-200"
           : slot.microZoneOnly
-          ? "bg-indigo-950/30 border-indigo-500/40"
-          : "bg-neutral-950 border-neutral-800"
+          ? "bg-indigo-50 border-indigo-200"
+          : "bg-subtle/80 border-border-theme hover:border-brand"
       }`}
     >
       <div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-bold text-white">{slot.timeWindow}</span>
+          <span className="text-sm font-bold text-text-main">{slot.timeWindow}</span>
           {slot.isPanicSlot && (
             <span className="text-[10px] font-extrabold bg-red-600 text-white px-2 py-0.5 rounded-full animate-pulse">
               🔥 FLASH DEAL
             </span>
           )}
           {slot.microZoneOnly === "student" && (
-            <span className="text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30 px-2 py-0.5 rounded-full">
+            <span className="text-[10px] font-bold bg-purple-100 text-purple-700 border border-purple-200 px-2 py-0.5 rounded-full">
               🎓 Φοιτητικό Πάσο
             </span>
           )}
           {slot.microZoneOnly === "office" && (
-            <span className="text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30 px-2 py-0.5 rounded-full">
+            <span className="text-[10px] font-bold bg-blue-100 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-full">
               💼 Office Break
             </span>
           )}
@@ -170,18 +172,18 @@ function SlotItem({
             <span
               className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
                 isExpired
-                  ? "bg-red-500/10 text-red-400 border border-red-500/20"
-                  : "bg-amber-400/10 text-amber-300 border border-amber-400/20"
+                  ? "bg-red-100 text-red-700 border border-red-200"
+                  : "bg-brand-light text-brand-text border border-brand-border"
               }`}
             >
               ⏳ {label}
             </span>
           )}
         </div>
-        <div className="text-xs text-amber-400 font-medium mt-0.5">
+        <div className="text-xs text-brand-text font-bold mt-0.5">
           {slot.discount}
         </div>
-        <div className="text-[11px] text-neutral-400">
+        <div className="text-[11px] text-text-muted">
           {isExpired
             ? "Η προσφορά ολοκληρώθηκε"
             : slot.availableTables > 0
@@ -189,15 +191,20 @@ function SlotItem({
             : "Εξαντλήθηκε"}
         </div>
       </div>
+
       <button
+        type="button"
         disabled={!isAvailable}
-        onClick={onSelect}
-        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+        onClick={(e) => {
+          e.stopPropagation();
+          onSelect();
+        }}
+        className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer shadow-sm ${
           isAvailable
             ? slot.isPanicSlot
-              ? "bg-red-500 hover:bg-red-400 text-white shadow-lg shadow-red-600/20"
-              : "bg-amber-400 hover:bg-amber-300 text-neutral-950"
-            : "bg-neutral-800 text-neutral-500 cursor-not-allowed"
+              ? "bg-red-600 hover:bg-red-500 text-white shadow-red-600/20"
+              : "bg-brand hover:bg-brand-hover text-white"
+            : "bg-subtle text-text-muted cursor-not-allowed shadow-none border border-border-theme"
         }`}
       >
         {isExpired ? "Έληξε" : slot.availableTables > 0 ? "Κράτηση" : "Full"}
@@ -207,6 +214,7 @@ function SlotItem({
 }
 
 export default function Home() {
+  const router = useRouter();
   const [currentUser, setCurrentUser] = useState<User | null>(null);
 
   const [venueList, setVenueList] = useState<VenueDoc[]>([]);
@@ -220,7 +228,7 @@ export default function Home() {
   const [currentBooking, setCurrentBooking] = useState<Booking | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Φίλτρα Αναζήτησης + Νέα Φίλτρα (#2, #4, #7)
+  // Φίλτρα
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedArea, setSelectedArea] = useState("all");
   const [minDiscount, setMinDiscount] = useState<number>(0);
@@ -229,7 +237,7 @@ export default function Home() {
   const [onlyTakeaway, setOnlyTakeaway] = useState(false);
   const [showMap, setShowMap] = useState(false);
 
-  // #3: «Κλείδωμα Παρέας» (15-Minute Squad Hold)
+  // 15-Minute Squad Hold
   const [squadHold, setSquadHold] = useState<{
     venueName: string;
     expiresAt: number;
@@ -237,7 +245,7 @@ export default function Home() {
   } | null>(null);
   const [squadSecondsLeft, setSquadSecondsLeft] = useState<number>(0);
 
-  // #6: Micro-Zones (B2B Office Break & Φοιτητικό Πάσο)
+  // Micro-Zones Pass
   const [showPassModal, setShowPassModal] = useState(false);
   const [passEmailInput, setPassEmailInput] = useState("");
   const [verifiedPass, setVerifiedPass] = useState<{
@@ -245,16 +253,18 @@ export default function Home() {
     email: string;
   } | null>(null);
 
-  // #7: 1-Tap Dashboard Καταστηματάρχη (Γρήγορος έλεγχος βάρδιας)
-  const [showShiftPanel, setShowShiftPanel] = useState(false);
-  const [activeMerchantVenueId, setActiveMerchantVenueId] = useState<string>("");
-
-  // 1. Παρακολούθηση Auth & ανάκτηση αποθηκευμένου Πάσου (#6)
   useEffect(() => {
-    const savedPass = localStorage.getItem("happyseats_microzone_pass");
+    const savedPass =
+      typeof window !== "undefined"
+        ? localStorage.getItem("happyseats_microzone_pass")
+        : null;
+
     if (savedPass) {
       try {
-        setVerifiedPass(JSON.parse(savedPass));
+        const parsed = JSON.parse(savedPass);
+        queueMicrotask(() => {
+          setVerifiedPass(parsed);
+        });
       } catch {
         // ignore
       }
@@ -266,7 +276,6 @@ export default function Home() {
     return () => unsubAuth();
   }, []);
 
-  // Countdown για το 15λεπτο «Κλείδωμα Παρέας» (#3)
   useEffect(() => {
     if (!squadHold) return;
     const interval = setInterval(() => {
@@ -279,13 +288,15 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [squadHold]);
 
-  // 2. Real-time Subscription Venues (με τα νέα πεδία 2, 4, 6, 7)
   useEffect(() => {
     const unsubVenues = onSnapshot(collection(db, "venues"), (snap) => {
       const vArr: VenueDoc[] = [];
-      snap.forEach((d, index) => {
+      snap.docs.forEach((d, index) => {
         const data = d.data();
-        // Default demo τιμές αν δεν έχουν οριστεί ακόμα στο Firestore
+        // Αν το κατάστημα έχει τεθεί σε αναστολή συνδρομής από τον Admin, ΔΕΝ εμφανίζεται στους πελάτες!
+        if (data.isPublished === false || data.subscriptionStatus === "past_due") {
+          return;
+        }
         const defaultVibes =
           index % 2 === 0
             ? ["☀️ Έχει ήλιο έξω", "💻 Χαλαρό για δουλειά"]
@@ -313,16 +324,12 @@ export default function Home() {
         });
       });
       setVenueList(vArr);
-      if (vArr.length > 0 && !activeMerchantVenueId) {
-        setActiveMerchantVenueId(vArr[0].id);
-      }
       setLoading(false);
     });
 
     return () => unsubVenues();
-  }, [activeMerchantVenueId]);
+  }, []);
 
-  // 3. Real-time Subscription Slots
   useEffect(() => {
     const unsubSlots = onSnapshot(collection(db, "slots"), (snap) => {
       const sArr: SlotDeal[] = [];
@@ -335,7 +342,6 @@ export default function Home() {
     return () => unsubSlots();
   }, []);
 
-  // 4. Σύνδεση Venues με τα αντίστοιχα Slots τους (+ δυναμικά Panic Deals #2 & Micro-Zone Deals #6)
   const fullVenues: VenueWithSlots[] = useMemo(() => {
     const now = new Date();
     const oneHourLater = new Date(now.getTime() + 60 * 60 * 1000);
@@ -348,7 +354,6 @@ export default function Home() {
         ...slotList.filter((s) => s.venueName === v.name || s.venueId === v.id),
       ];
 
-      // #2: Αν ο καταστηματάρχης έχει ενεργοποιήσει το Panic Button, εμφανίζεται αυτόματο Flash Slot
       if (v.panicDealActive) {
         matchedSlots.unshift({
           id: `panic-${v.id}`,
@@ -362,7 +367,6 @@ export default function Home() {
         });
       }
 
-      // #6: Αν ο χρήστης έχει ξεκλειδώσει Φοιτητικό ή Office Pass, εμφανίζεται το αποκλειστικό Micro-Zone Deal
       if (verifiedPass && v.microZoneType === verifiedPass.type) {
         matchedSlots.push({
           id: `microzone-${v.id}`,
@@ -423,16 +427,11 @@ export default function Home() {
           venue.area.toLowerCase() === selectedArea.toLowerCase();
 
         const matchesDiscount = minDiscount === 0 || venue.slots.length > 0;
-
-        // #4: Φιλτράρισμα με βάση τα επιλεγμένα Vibe & Weather tags
         const matchesVibes =
           selectedVibes.length === 0 ||
           selectedVibes.every((tag) => venue.vibeTags.includes(tag));
 
-        // #2: Φιλτράρισμα μόνο Panic / Flash Deals
         const matchesPanic = !onlyPanicDeals || venue.panicDealActive;
-
-        // #7: Φιλτράρισμα μόνο Take-away Ready
         const matchesTakeaway = !onlyTakeaway || venue.takeawayReady;
 
         return (
@@ -454,7 +453,6 @@ export default function Home() {
     onlyTakeaway,
   ]);
 
-  // Πέρασμα όλων των στοιχείων (και των νέων πεδίων 2, 4, 6, 7) στον χάρτη
   const mapVenuesData = useMemo(() => {
     return filteredVenues.map((v) => {
       const bestDiscount = v.slots.length > 0 ? v.slots[0].discount : "-20%";
@@ -476,16 +474,17 @@ export default function Home() {
     });
   }, [filteredVenues]);
 
-  // #4: Toggle Vibe Tag στο φίλτρο
   const toggleVibeFilter = (tag: string) => {
     setSelectedVibes((prev) =>
       prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
     );
   };
 
-  // #3: «Κλείδωμα Παρέας» (Hold 15 mins & Share σε Viber/WhatsApp)
-  const handleSquadLock = async (venue: VenueWithSlots) => {
-    const expiresAt = Date.now() + 15 * 60 * 1000;
+  const handleSquadLock = async (
+    venue: VenueWithSlots,
+    currentTimestamp: number
+  ) => {
+    const expiresAt = currentTimestamp + 15 * 60 * 1000;
     setSquadHold({
       venueName: venue.name,
       expiresAt,
@@ -504,17 +503,14 @@ export default function Home() {
           url: shareUrl,
         });
       } catch {
-        // user closed share
+        // ignore
       }
     } else if (navigator.clipboard) {
       await navigator.clipboard.writeText(`${shareText} ${shareUrl}`);
-      alert(
-        "⏳ Το τραπέζι κλειδώθηκε για 15 λεπτά! Το link αντιγράφηκε — στείλτο στην παρέα σε Viber/WhatsApp."
-      );
+      alert("⏳ Το τραπέζι κλειδώθηκε για 15 λεπτά! Το link αντιγράφηκε.");
     }
   };
 
-  // #6: Επαλήθευση Φοιτητικού (.gr) ή Εταιρικού Email
   const handleVerifyPass = (e: React.FormEvent) => {
     e.preventDefault();
     const clean = passEmailInput.trim().toLowerCase();
@@ -537,23 +533,6 @@ export default function Home() {
     setPassEmailInput("");
   };
 
-  // #7: 1-Tap Ενημέρωση Καταστήματος στο Firestore (Live Shift View)
-  const updateMerchantVenueLive = async (
-    venueId: string,
-    updates: Partial<VenueDoc>
-  ) => {
-    try {
-      const venueRef = doc(db, "venues", venueId);
-      await updateDoc(venueRef, updates);
-    } catch (err) {
-      console.error("Failed to update venue shift status:", err);
-      // Fallback σε local state αν τα Firestore rules δεν επιτρέπουν update χωρίς admin
-      setVenueList((prev) =>
-        prev.map((v) => (v.id === venueId ? { ...v, ...updates } : v))
-      );
-    }
-  };
-
   const handleShareCurrentBooking = async () => {
     if (!currentBooking) return;
     const shareText = `🍽️ Έκλεισα τραπέζι στο "${currentBooking.venueName}" μέσω HappySeats!\n📅 Ημερομηνία: ${currentBooking.date}\n⏰ Ώρα: ${currentBooking.timeWindow}\n👥 Άτομα: ${currentBooking.partySize}\n🎁 Έκπτωση: ${currentBooking.discount}\n🎟️ Κωδικός Κράτησης: ${currentBooking.ticketCode}\n\nΡαντεβού εκεί!`;
@@ -569,12 +548,18 @@ export default function Home() {
       }
     } else if (navigator.clipboard) {
       await navigator.clipboard.writeText(shareText);
-      alert("Τα στοιχεία της κράτησης αντιγράφηκαν! Μπορείτε να τα στείλετε στην παρέα σας.");
+      alert("Τα στοιχεία της κράτησης αντιγράφηκαν!");
     }
   };
 
   const handleBooking = async () => {
     if (!selectedVenue || !selectedSlot) return;
+
+    if (!currentUser) {
+      alert("Για να εκδώσετε e-ticket με έκπτωση, πρέπει πρώτα να συνδεθείτε.");
+      router.push("/login");
+      return;
+    }
 
     if (selectedSlot.availableTables <= 0) {
       alert("Δυστυχώς εξαντλήθηκαν τα τραπέζια!");
@@ -582,10 +567,44 @@ export default function Home() {
     }
 
     setIsSubmitting(true);
-
     const cleanPrefix = selectedVenue.name.substring(0, 3).toUpperCase();
     const code = `${cleanPrefix}-${Math.floor(1000 + Math.random() * 9000)}`;
     const todayDate = new Date().toLocaleDateString("el-GR");
+
+    try {
+      const qExisting = query(
+        collection(db, "bookings"),
+        where("customerId", "==", currentUser.uid),
+        where("date", "==", todayDate)
+      );
+      const snapExisting = await getDocs(qExisting);
+      const userTodayBookings = snapExisting.docs.map((d) => d.data());
+
+      const activeTodayCount = userTodayBookings.filter(
+        (b) => b.status === "confirmed"
+      ).length;
+      if (activeTodayCount >= 2) {
+        alert(
+          "Έχετε φτάσει το μέγιστο όριο (2 ενεργά tickets ανά ημέρα). Εξαργυρώστε ή ακυρώστε μία κράτηση για να συνεχίσετε."
+        );
+        setIsSubmitting(false);
+        return;
+      }
+
+      const hasConflict = userTodayBookings.some(
+        (b) =>
+          b.status === "confirmed" && b.timeWindow === selectedSlot.timeWindow
+      );
+      if (hasConflict) {
+        alert(
+          `Έχετε ήδη κράτηση για τη χρονοθυρίδα "${selectedSlot.timeWindow}".`
+        );
+        setIsSubmitting(false);
+        return;
+      }
+    } catch (checkErr) {
+      console.warn("Booking verification check warning:", checkErr);
+    }
 
     const newBooking: Booking = {
       ticketCode: code,
@@ -601,7 +620,6 @@ export default function Home() {
       const bookingsCollectionRef = collection(db, "bookings");
       const newBookingRef = doc(bookingsCollectionRef);
 
-      // Αν είναι δυναμικό slot (Panic Deal #2 ή Micro-Zone #6), αποθηκεύουμε απευθείας το booking
       if (
         selectedSlot.id.startsWith("panic-") ||
         selectedSlot.id.startsWith("microzone-")
@@ -669,29 +687,23 @@ export default function Home() {
     }
   };
 
-  const activeMerchantVenue = useMemo(
-    () => venueList.find((v) => v.id === activeMerchantVenueId) || venueList[0],
-    [venueList, activeMerchantVenueId]
-  );
-
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 p-6">
-      <header className="max-w-5xl mx-auto flex flex-wrap items-center justify-between gap-3 pb-6 border-b border-neutral-800">
+    <div className="min-h-screen bg-surface text-text-main p-6">
+      <header className="max-w-5xl mx-auto flex flex-wrap items-center justify-between gap-3 pb-6 border-b border-border-theme">
         <div>
-          <h1 className="text-2xl font-black text-amber-400">HappySeats</h1>
-          <p className="text-xs text-neutral-400">
+          <h1 className="text-2xl font-black text-brand tracking-tight">HappySeats</h1>
+          <p className="text-xs text-text-muted">
             Κλείσε τραπέζι ή παραλαβή τις σωστές ώρες, κέρδισε έκπτωση
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* #6: Κουμπί Φοιτητικού / Office Break Πάσου */}
           <button
             onClick={() => setShowPassModal(true)}
             className={`text-xs font-bold px-3 py-2 rounded-xl transition border flex items-center gap-1.5 cursor-pointer ${
               verifiedPass
-                ? "bg-indigo-500/20 text-indigo-300 border-indigo-500/40"
-                : "bg-neutral-900 hover:bg-neutral-800 text-neutral-200 border-neutral-800"
+                ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                : "bg-card hover:bg-subtle text-text-main border-border-theme shadow-sm"
             }`}
           >
             {verifiedPass ? (
@@ -711,29 +723,21 @@ export default function Home() {
             )}
           </button>
 
-          {/* #7: 1-Tap Dashboard Καταστηματάρχη Toggle */}
-          <button
-            onClick={() => setShowShiftPanel((prev) => !prev)}
-            className="text-xs font-bold px-3 py-2 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 rounded-xl transition border border-amber-400/30 flex items-center gap-1 cursor-pointer"
-          >
-            ⚡ Live Βάρδια (1-Tap)
-          </button>
-
           <Link
             href="/my-tickets"
-            className="text-xs font-semibold px-3 py-2 bg-neutral-900 hover:bg-neutral-800 text-white rounded-xl transition border border-neutral-800 flex items-center gap-1"
+            className="text-xs font-semibold px-3 py-2 bg-card hover:bg-subtle text-text-main rounded-xl transition border border-border-theme shadow-sm flex items-center gap-1"
           >
             🎟️ Τα Εισιτήριά μου
           </Link>
 
           {currentUser ? (
             <div className="flex items-center gap-2">
-              <span className="text-xs text-neutral-400 hidden sm:inline">
+              <span className="text-xs text-text-muted hidden sm:inline font-medium">
                 👤 {currentUser.displayName || currentUser.email?.split("@")[0]}
               </span>
               <button
                 onClick={() => signOut(auth)}
-                className="text-xs px-2.5 py-2 bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-white rounded-xl transition border border-neutral-800"
+                className="text-xs px-2.5 py-2 bg-card hover:bg-subtle text-text-muted hover:text-red-600 rounded-xl transition border border-border-theme shadow-sm cursor-pointer"
               >
                 Έξοδος
               </button>
@@ -741,35 +745,45 @@ export default function Home() {
           ) : (
             <Link
               href="/login"
-              className="text-xs font-bold px-3 py-2 bg-amber-400 hover:bg-amber-300 text-neutral-950 rounded-xl transition shadow"
+              className="text-xs font-bold px-3 py-2 bg-brand hover:bg-brand-hover text-white rounded-xl transition shadow-sm"
             >
               Σύνδεση
             </Link>
           )}
 
           <Link
-            href="/merchant"
-            className="text-xs font-semibold px-3 py-2 bg-neutral-900 hover:bg-neutral-800 text-amber-300 rounded-xl transition border border-neutral-800 hidden md:inline-block"
+            href="/merchant/login"
+            className="text-xs font-semibold px-3 py-2 bg-card hover:bg-brand-light text-brand-text rounded-xl transition border border-border-theme shadow-sm hidden md:inline-block"
           >
-            Για Εστιατόρια →
+            Συνεργάτες Εστίασης →
           </Link>
+          {currentUser?.email &&
+          ["skampanar@gmail.com", "olga_dre@yahoo.gr", "tommyanastaso@gmail.com"].includes(
+            currentUser.email.toLowerCase().trim()
+          ) && (
+            <Link
+              href="/admin"
+              className="text-xs font-bold px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl transition shadow-sm flex items-center gap-1"
+            >
+              🛡️ Admin Panel
+            </Link>
+          )}
         </div>
       </header>
 
       <main className="max-w-5xl mx-auto py-8">
-        {/* #3: Ενεργό Banner «Κλείδωμα Παρέας» (15-Minute Hold) */}
         {squadHold && (
-          <div className="mb-6 p-4 bg-gradient-to-r from-amber-500/20 via-neutral-900 to-neutral-900 border border-amber-400/50 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-lg">
+          <div className="mb-6 p-4 bg-gradient-to-r from-brand-light via-card to-card border border-brand-border rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-sm">
             <div className="flex items-center gap-3">
               <span className="text-2xl">🤝</span>
               <div>
-                <div className="text-xs font-bold text-amber-300 uppercase tracking-wider">
+                <div className="text-xs font-bold text-brand-text uppercase tracking-wider">
                   Κρατημενο για την παρεα ({Math.floor(squadSecondsLeft / 60)}:
                   {String(squadSecondsLeft % 60).padStart(2, "0")})
                 </div>
-                <p className="text-sm font-bold text-white">
+                <p className="text-sm font-bold text-text-main">
                   {squadHold.venueName} —{" "}
-                  <span className="text-emerald-400">
+                  <span className="text-emerald-600">
                     {squadHold.friendsJoined}/3 φίλοι επιβεβαίωσαν
                   </span>
                 </p>
@@ -784,13 +798,13 @@ export default function Home() {
                       : null
                   )
                 }
-                className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs rounded-xl transition cursor-pointer"
+                className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl transition cursor-pointer shadow-sm"
               >
                 + Επιβεβαίωση Φίλου (Demo)
               </button>
               <button
                 onClick={() => setSquadHold(null)}
-                className="px-2.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-400 text-xs rounded-xl transition cursor-pointer"
+                className="px-2.5 py-1.5 bg-subtle hover:bg-border-theme text-text-muted text-xs rounded-xl transition cursor-pointer"
               >
                 ✕
               </button>
@@ -798,191 +812,50 @@ export default function Home() {
           </div>
         )}
 
-        {/* #7 & #2: 1-Tap Dashboard Καταστηματάρχη (Live Shift View) */}
-        {showShiftPanel && activeMerchantVenue && (
-          <section className="mb-8 p-5 bg-neutral-900 border-2 border-amber-400/60 rounded-3xl shadow-2xl space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-neutral-800 pb-3">
-              <div>
-                <span className="text-[10px] font-black uppercase tracking-widest bg-amber-400 text-neutral-950 px-2 py-0.5 rounded-md">
-                  1-TAP ΚΟΝΣΟΛΑ ΒΑΡΔΙΑΣ (#7 & #2)
-                </span>
-                <h3 className="text-base font-bold text-white mt-1">
-                  Άμεση Ενημέρωση Πληρότητας & Panic Button
-                </h3>
-              </div>
-
-              <select
-                value={activeMerchantVenue.id}
-                onChange={(e) => setActiveMerchantVenueId(e.target.value)}
-                className="bg-neutral-950 border border-neutral-700 rounded-xl px-3 py-2 text-xs font-bold text-amber-400"
-              >
-                {venueList.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    🏪 {v.name} ({v.area})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* 3 Τεράστια Κουμπιά Πληρότητας */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <button
-                onClick={() =>
-                  updateMerchantVenueLive(activeMerchantVenue.id, {
-                    tableStatus: "plenty",
-                  })
-                }
-                className={`py-3 px-4 rounded-2xl font-black text-xs border transition cursor-pointer ${
-                  activeMerchantVenue.tableStatus === "plenty"
-                    ? "bg-emerald-500 text-neutral-950 border-emerald-400 shadow-lg shadow-emerald-500/20"
-                    : "bg-neutral-950 text-neutral-300 border-neutral-800 hover:border-emerald-500/50"
-                }`}
-              >
-                🟢 ΑΝΕΤΟ (Διαθέσιμα Τραπέζια)
-              </button>
-
-              <button
-                onClick={() =>
-                  updateMerchantVenueLive(activeMerchantVenue.id, {
-                    tableStatus: "few",
-                  })
-                }
-                className={`py-3 px-4 rounded-2xl font-black text-xs border transition cursor-pointer ${
-                  activeMerchantVenue.tableStatus === "few"
-                    ? "bg-amber-400 text-neutral-950 border-amber-300 shadow-lg shadow-amber-400/20"
-                    : "bg-neutral-950 text-neutral-300 border-neutral-800 hover:border-amber-400/50"
-                }`}
-              >
-                🟠 1-3 ΤΡΑΠΕΖΙΑ (Σχεδόν Γεμάτο)
-              </button>
-
-              <button
-                onClick={() =>
-                  updateMerchantVenueLive(activeMerchantVenue.id, {
-                    tableStatus: "full",
-                  })
-                }
-                className={`py-3 px-4 rounded-2xl font-black text-xs border transition cursor-pointer ${
-                  activeMerchantVenue.tableStatus === "full"
-                    ? "bg-red-500 text-white border-red-400 shadow-lg shadow-red-500/20"
-                    : "bg-neutral-950 text-neutral-300 border-neutral-800 hover:border-red-500/50"
-                }`}
-              >
-                🔴 ΠΛΗΡΕΣ (Μόνο Αναμονή/Takeaway)
-              </button>
-            </div>
-
-            {/* Panic Button (#2) & Take-away Toggle (#7) */}
-            <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  onClick={() =>
-                    updateMerchantVenueLive(activeMerchantVenue.id, {
-                      panicDealActive: !activeMerchantVenue.panicDealActive,
-                    })
-                  }
-                  className={`px-4 py-2.5 rounded-xl font-black text-xs transition flex items-center gap-1.5 cursor-pointer ${
-                    activeMerchantVenue.panicDealActive
-                      ? "bg-red-600 text-white animate-pulse shadow-lg shadow-red-600/30"
-                      : "bg-neutral-950 hover:bg-red-950/50 text-red-400 border border-red-500/40"
-                  }`}
-                >
-                  🔥{" "}
-                  {activeMerchantVenue.panicDealActive
-                    ? "PANIC DEAL ΕΝΕΡΓΟ (-30% για 1 ώρα)"
-                    : "Ενεργοποίηση Panic Deal (-30% στα επόμενα 3 τραπέζια)"}
-                </button>
-
-                <button
-                  onClick={() =>
-                    updateMerchantVenueLive(activeMerchantVenue.id, {
-                      takeawayReady: !activeMerchantVenue.takeawayReady,
-                    })
-                  }
-                  className={`px-3.5 py-2.5 rounded-xl font-bold text-xs border transition cursor-pointer ${
-                    activeMerchantVenue.takeawayReady
-                      ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
-                      : "bg-neutral-950 text-neutral-500 border-neutral-800"
-                  }`}
-                >
-                  🛍️ Take-away: {activeMerchantVenue.takeawayReady ? "ON" : "OFF"}
-                </button>
-              </div>
-
-              {/* #4: Vibe Tags του καταστήματος */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                {VIBE_OPTIONS.map((tag) => {
-                  const hasTag = activeMerchantVenue.vibeTags.includes(tag);
-                  return (
-                    <button
-                      key={tag}
-                      onClick={() => {
-                        const updatedTags = hasTag
-                          ? activeMerchantVenue.vibeTags.filter((t) => t !== tag)
-                          : [...activeMerchantVenue.vibeTags, tag];
-                        updateMerchantVenueLive(activeMerchantVenue.id, {
-                          vibeTags: updatedTags,
-                        });
-                      }}
-                      className={`text-[11px] px-2.5 py-1 rounded-lg border font-medium transition cursor-pointer ${
-                        hasTag
-                          ? "bg-amber-400/20 text-amber-300 border-amber-400/50"
-                          : "bg-neutral-950 text-neutral-500 border-neutral-800"
-                      }`}
-                    >
-                      {tag}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </section>
-        )}
-
         {currentBooking && (
-          <div className="mb-10 p-6 bg-neutral-900 border-2 border-amber-400 rounded-3xl flex flex-col md:flex-row items-center justify-between gap-6 shadow-2xl">
+          <div className="mb-10 p-6 bg-card border-2 border-brand rounded-3xl flex flex-col md:flex-row items-center justify-between gap-6 shadow-md">
             <div className="space-y-2">
-              <span className="text-xs uppercase tracking-widest px-3 py-1 bg-amber-400/20 text-amber-300 rounded-full font-bold">
+              <span className="text-xs uppercase tracking-widest px-3 py-1 bg-brand-light text-brand-text rounded-full font-bold border border-brand-border">
                 ✓ e-Ticket Έτοιμο & Αποθηκευμένο
               </span>
-              <h2 className="text-2xl font-bold text-white">
+              <h2 className="text-2xl font-bold text-text-main">
                 {currentBooking.venueName}
               </h2>
-              <p className="text-neutral-300 text-sm">
+              <p className="text-text-muted text-sm">
                 Ώρα:{" "}
-                <span className="font-semibold text-white">
+                <span className="font-semibold text-text-main">
                   {currentBooking.timeWindow}
                 </span>{" "}
                 | Ημερομηνία: {currentBooking.date}
               </p>
-              <p className="text-neutral-300 text-sm">
+              <p className="text-text-muted text-sm">
                 Τύπος:{" "}
-                <span className="font-semibold text-white">
+                <span className="font-semibold text-text-main">
                   {currentBooking.orderMode === "takeaway"
                     ? "🛍️ Παραλαβή Take-away"
                     : `🍽️ Τραπέζι (${currentBooking.partySize} άτομα)`}
                 </span>{" "}
                 | Προσφορά:{" "}
-                <span className="text-amber-400 font-bold">
+                <span className="text-brand-text font-bold">
                   {currentBooking.discount}
                 </span>
               </p>
               <div className="pt-2">
                 <button
                   onClick={handleShareCurrentBooking}
-                  className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-white border border-neutral-700 rounded-xl text-xs font-semibold transition flex items-center gap-1.5"
+                  className="px-4 py-2 bg-subtle hover:bg-border-theme text-text-main border border-border-theme rounded-xl text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
                 >
                   <span>📲</span> Κοινοποίηση στην παρέα
                 </button>
               </div>
             </div>
 
-            <div className="bg-white p-4 rounded-2xl flex flex-col items-center">
+            <div className="bg-subtle border border-border-theme p-4 rounded-2xl flex flex-col items-center">
               <QRCodeSVG
                 value={`HAPPYSEATS:${currentBooking.ticketCode}|${currentBooking.venueName}|${currentBooking.partySize}P`}
                 size={140}
               />
-              <span className="text-black font-mono font-bold text-sm mt-2">
+              <span className="text-text-main font-mono font-bold text-sm mt-2">
                 {currentBooking.ticketCode}
               </span>
             </div>
@@ -990,10 +863,10 @@ export default function Home() {
         )}
 
         {/* Μπάρα Αναζήτησης και Φίλτρων */}
-        <section className="bg-neutral-900 border border-neutral-800 p-5 rounded-3xl mb-8 shadow-lg space-y-4">
+        <section className="bg-card border border-border-theme p-5 rounded-3xl mb-8 shadow-sm space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div>
-              <label className="block text-[11px] font-semibold text-neutral-400 uppercase tracking-wider mb-1">
+              <label className="block text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-1">
                 Αναζήτηση
               </label>
               <input
@@ -1001,18 +874,18 @@ export default function Home() {
                 placeholder="Όνομα μαγαζιού ή κουζίνα..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400 placeholder:text-neutral-600"
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand placeholder:text-text-muted"
               />
             </div>
 
             <div>
-              <label className="block text-[11px] font-semibold text-neutral-400 uppercase tracking-wider mb-1">
+              <label className="block text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-1">
                 Περιοχή
               </label>
               <select
                 value={selectedArea}
                 onChange={(e) => setSelectedArea(e.target.value)}
-                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400"
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand cursor-pointer"
               >
                 <option value="all">Όλες οι περιοχές</option>
                 {availableAreas.map((area) => (
@@ -1024,13 +897,13 @@ export default function Home() {
             </div>
 
             <div>
-              <label className="block text-[11px] font-semibold text-neutral-400 uppercase tracking-wider mb-1">
+              <label className="block text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-1">
                 Έκπτωση
               </label>
               <select
                 value={minDiscount}
                 onChange={(e) => setMinDiscount(Number(e.target.value))}
-                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400"
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand cursor-pointer"
               >
                 <option value={0}>Όλες οι εκπτώσεις</option>
                 <option value={20}>Τουλάχιστον -20%</option>
@@ -1041,9 +914,8 @@ export default function Home() {
             </div>
           </div>
 
-          {/* #4 & #2 & #7: Live Vibe & Weather Chips + Panic Deal Filter */}
-          <div className="pt-2 border-t border-neutral-800/60 space-y-2">
-            <div className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">
+          <div className="pt-2 border-t border-border-theme space-y-2">
+            <div className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">
               Live Vibe & Διαθεσιμοτητα Τωρα
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -1051,8 +923,8 @@ export default function Home() {
                 onClick={() => setOnlyPanicDeals((prev) => !prev)}
                 className={`text-xs px-3 py-1.5 rounded-full font-bold border transition cursor-pointer ${
                   onlyPanicDeals
-                    ? "bg-red-600 text-white border-red-500 shadow-lg shadow-red-600/20"
-                    : "bg-neutral-950 text-red-400 border-red-500/30 hover:border-red-500/60"
+                    ? "bg-red-600 text-white border-red-600 shadow-sm"
+                    : "bg-card text-red-600 border-red-200 hover:border-red-400"
                 }`}
               >
                 🔥 Flash Τραπέζια (-30% Τώρα)
@@ -1062,8 +934,8 @@ export default function Home() {
                 onClick={() => setOnlyTakeaway((prev) => !prev)}
                 className={`text-xs px-3 py-1.5 rounded-full font-semibold border transition cursor-pointer ${
                   onlyTakeaway
-                    ? "bg-emerald-500 text-neutral-950 border-emerald-400"
-                    : "bg-neutral-950 text-neutral-300 border-neutral-800 hover:border-neutral-700"
+                    ? "bg-emerald-500 text-white border-emerald-500 shadow-sm"
+                    : "bg-card text-text-main border-border-theme hover:border-text-muted"
                 }`}
               >
                 🛍️ Άμεσο Take-away
@@ -1077,8 +949,8 @@ export default function Home() {
                     onClick={() => toggleVibeFilter(tag)}
                     className={`text-xs px-3 py-1.5 rounded-full font-semibold border transition cursor-pointer ${
                       isSelected
-                        ? "bg-amber-400 text-neutral-950 border-amber-300"
-                        : "bg-neutral-950 text-neutral-300 border-neutral-800 hover:border-neutral-700"
+                        ? "bg-brand text-white border-brand shadow-sm"
+                        : "bg-card text-text-main border-border-theme hover:border-text-muted"
                     }`}
                   >
                     {tag}
@@ -1088,16 +960,16 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="flex justify-between items-center pt-2 border-t border-neutral-800/60 text-xs">
-            <span className="text-neutral-400">
+          <div className="flex justify-between items-center pt-2 border-t border-border-theme text-xs">
+            <span className="text-text-muted">
               Βρέθηκαν{" "}
-              <strong className="text-amber-400">{filteredVenues.length}</strong>{" "}
+              <strong className="text-brand-text font-bold">{filteredVenues.length}</strong>{" "}
               καταστήματα
             </span>
             <div className="flex items-center gap-4">
               <button
                 onClick={() => setShowMap((prev) => !prev)}
-                className="px-3 py-1 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 border border-amber-400/30 rounded-lg font-bold transition flex items-center gap-1 cursor-pointer"
+                className="px-3.5 py-1.5 bg-brand-light hover:opacity-90 text-brand-text border border-brand-border rounded-xl font-bold transition flex items-center gap-1 cursor-pointer"
               >
                 {showMap ? "📋 Προβολή Λίστας" : "🗺️ Προβολή Χάρτη"}
               </button>
@@ -1116,7 +988,7 @@ export default function Home() {
                     setOnlyPanicDeals(false);
                     setOnlyTakeaway(false);
                   }}
-                  className="text-neutral-400 hover:text-white transition underline cursor-pointer"
+                  className="text-text-muted hover:text-text-main transition underline cursor-pointer"
                 >
                   Καθαρισμός
                 </button>
@@ -1127,22 +999,21 @@ export default function Home() {
 
         {showMap && <VenueMap venues={mapVenuesData} />}
 
-        <h2 className="text-xl font-bold mb-6">Διαθέσιμες Προσφορές Σήμερα</h2>
+        <h2 className="text-xl font-bold text-text-main mb-6">Διαθέσιμες Προσφορές Σήμερα</h2>
 
         {loading ? (
-          <div className="text-center py-20 text-neutral-500 text-sm">
+          <div className="text-center py-20 text-text-muted text-sm">
             Φόρτωση προσφορών...
           </div>
         ) : filteredVenues.length === 0 ? (
-          <div className="bg-neutral-900 border border-neutral-800 p-12 rounded-3xl text-center space-y-3">
+          <div className="bg-card border border-border-theme p-12 rounded-3xl text-center space-y-3 shadow-sm">
             <span className="text-3xl">🍽️</span>
-            <h3 className="font-bold text-white text-base">
+            <h3 className="font-bold text-text-main text-base">
               Δεν βρέθηκαν διαθέσιμες προσφορές
             </h3>
-            <p className="text-xs text-neutral-400 max-w-sm mx-auto">
+            <p className="text-xs text-text-muted max-w-sm mx-auto">
               Αυτή τη στιγμή δεν υπάρχουν ενεργά happy hour τραπέζια για τα
-              κριτήρια που επιλέξατε. Δοκιμάστε να καθαρίσετε τα φίλτρα ή
-              ελέγξτε ξανά σε λίγο!
+              κριτήρια που επιλέξατε.
             </p>
           </div>
         ) : (
@@ -1150,10 +1021,11 @@ export default function Home() {
             {filteredVenues.map((venue) => (
               <div
                 key={venue.id}
-                className={`bg-neutral-900 rounded-3xl overflow-hidden border shadow-md transition ${
+                onClick={() => router.push(`/venue/${venue.slug}`)}
+                className={`bg-card rounded-3xl overflow-hidden border shadow-sm hover:shadow-md transition cursor-pointer hover:border-brand ${
                   venue.panicDealActive
-                    ? "border-red-500/60 shadow-red-950/30"
-                    : "border-neutral-800"
+                    ? "border-red-400 ring-1 ring-red-400"
+                    : "border-border-theme"
                 }`}
               >
                 <div className="relative w-full h-48">
@@ -1166,34 +1038,32 @@ export default function Home() {
                     className="w-full h-full object-cover"
                   />
 
-                  {/* #2: Panic Deal Overlay Banner */}
                   {venue.panicDealActive && (
-                    <div className="absolute top-3 left-3 right-3 bg-red-600/95 backdrop-blur-sm text-white px-3 py-1.5 rounded-xl flex items-center justify-between text-xs font-black shadow-lg animate-pulse">
+                    <div className="absolute top-3 left-3 right-3 bg-red-600/95 backdrop-blur-sm text-white px-3 py-1.5 rounded-xl flex items-center justify-between text-xs font-black shadow-md animate-pulse">
                       <span>🔥 FLASH FILL-THE-TABLE</span>
                       <span>{venue.panicDealText}</span>
                     </div>
                   )}
 
-                  {/* #7: Live Table Status Badge πάνω στη φωτογραφία */}
                   <div className="absolute bottom-3 left-3 flex flex-wrap items-center gap-1.5">
                     {venue.tableStatus === "plenty" && (
-                      <span className="text-[11px] font-bold bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 px-2.5 py-1 rounded-full backdrop-blur-sm">
+                      <span className="text-[11px] font-bold bg-card/95 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full shadow-sm backdrop-blur-sm">
                         🟢 Άνετο για Παρέα
                       </span>
                     )}
                     {venue.tableStatus === "few" && (
-                      <span className="text-[11px] font-bold bg-amber-950/90 text-amber-300 border border-amber-500/40 px-2.5 py-1 rounded-full backdrop-blur-sm">
+                      <span className="text-[11px] font-bold bg-card/95 text-amber-700 border border-amber-200 px-2.5 py-1 rounded-full shadow-sm backdrop-blur-sm">
                         🟠 1-3 Τραπέζια
                       </span>
                     )}
                     {venue.tableStatus === "full" && (
-                      <span className="text-[11px] font-bold bg-red-950/90 text-red-300 border border-red-500/40 px-2.5 py-1 rounded-full backdrop-blur-sm">
+                      <span className="text-[11px] font-bold bg-card/95 text-red-700 border border-red-200 px-2.5 py-1 rounded-full shadow-sm backdrop-blur-sm">
                         🔴 Πλήρες Τραπεζιών
                       </span>
                     )}
 
                     {venue.takeawayReady && (
-                      <span className="text-[11px] font-bold bg-neutral-950/90 text-neutral-200 border border-neutral-700 px-2.5 py-1 rounded-full backdrop-blur-sm">
+                      <span className="text-[11px] font-bold bg-card/95 text-text-main border border-border-theme px-2.5 py-1 rounded-full shadow-sm backdrop-blur-sm">
                         🛍️ Take-away Ready
                       </span>
                     )}
@@ -1202,29 +1072,25 @@ export default function Home() {
 
                 <div className="p-6">
                   <div className="flex justify-between items-start mb-1">
-                    <Link
-                      href={`/venue/${venue.slug}`}
-                      className="hover:text-amber-400 transition"
-                    >
-                      <h3 className="text-lg font-bold text-white">
+                    <span className="hover:text-brand transition">
+                      <h3 className="text-lg font-bold text-text-main">
                         {venue.name} →
                       </h3>
-                    </Link>
-                    <span className="text-xs bg-neutral-800 text-neutral-300 px-2.5 py-1 rounded-md border border-neutral-700/50">
+                    </span>
+                    <span className="text-xs bg-subtle text-text-main px-2.5 py-1 rounded-lg border border-border-theme font-medium">
                       {venue.area}
                     </span>
                   </div>
-                  <p className="text-xs text-neutral-400 mb-3">
+                  <p className="text-xs text-text-muted mb-3">
                     {venue.category}
                   </p>
 
-                  {/* #4: Live Vibe & Weather Tags */}
                   {venue.vibeTags.length > 0 && (
                     <div className="flex flex-wrap gap-1.5 mb-4">
                       {venue.vibeTags.map((tag) => (
                         <span
                           key={tag}
-                          className="text-[11px] bg-neutral-950 text-amber-300/90 border border-neutral-800 px-2.5 py-0.5 rounded-lg font-medium"
+                          className="text-[11px] bg-subtle text-text-main border border-border-theme px-2.5 py-0.5 rounded-lg font-medium"
                         >
                           {tag}
                         </span>
@@ -1234,15 +1100,18 @@ export default function Home() {
 
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">
+                      <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">
                         Διαθέσιμες Χρονοθυρίδες
                       </span>
 
-                      {/* #3: Κουμπί «Κλείδωμα Παρέας (15')» */}
                       {venue.tableStatus !== "full" && (
                         <button
-                          onClick={() => handleSquadLock(venue)}
-                          className="text-[11px] font-bold text-amber-400 hover:text-amber-300 flex items-center gap-1 cursor-pointer"
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSquadLock(venue, Date.now());
+                          }}
+                          className="text-[11px] font-bold text-brand-text hover:opacity-80 flex items-center gap-1 cursor-pointer"
                         >
                           🤝 Κράτα το για την παρέα (15&apos;)
                         </button>
@@ -1250,24 +1119,28 @@ export default function Home() {
                     </div>
 
                     {venue.slots.length === 0 ? (
-                      <p className="text-xs text-neutral-500 py-3 italic">
+                      <p className="text-xs text-text-muted py-3 italic">
                         Δεν υπάρχουν ενεργές χρονοθυρίδες αυτή τη στιγμή.
                       </p>
                     ) : (
                       venue.slots.map((slot) => (
-                        <SlotItem
+                        <div
                           key={slot.id}
-                          slot={slot}
-                          onSelect={() => {
-                            setSelectedVenue(venue);
-                            setSelectedSlot(slot);
-                            setOrderMode(
-                              venue.tableStatus === "full"
-                                ? "takeaway"
-                                : "dine-in"
-                            );
-                          }}
-                        />
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <SlotItem
+                            slot={slot}
+                            onSelect={() => {
+                              setSelectedVenue(venue);
+                              setSelectedSlot(slot);
+                              setOrderMode(
+                                venue.tableStatus === "full"
+                                  ? "takeaway"
+                                  : "dine-in"
+                              );
+                            }}
+                          />
+                        </div>
                       ))
                     )}
                   </div>
@@ -1278,46 +1151,44 @@ export default function Home() {
         )}
       </main>
 
-      {/* #6: Modal Επαλήθευσης Φοιτητικού / Office Break Πάσου */}
+      {/* Modal Επαλήθευσης Πάσου */}
       {showPassModal && (
-        <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
-          <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl max-w-md w-full space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-card border border-border-theme p-6 rounded-3xl max-w-md w-full space-y-4 shadow-2xl">
             <div className="flex items-center justify-between">
-              <h3 className="font-bold text-lg text-white">
+              <h3 className="font-bold text-lg text-text-main">
                 🎓 / 💼 Ξεκλείδωμα Micro-Zone Deals
               </h3>
               <button
                 onClick={() => setShowPassModal(false)}
-                className="text-neutral-400 hover:text-white text-sm cursor-pointer"
+                className="text-text-muted hover:text-text-main text-sm cursor-pointer"
               >
                 ✕
               </button>
             </div>
 
-            <p className="text-xs text-neutral-400 leading-relaxed">
-              Δήλωσε το ακαδημαϊκό σου email (π.χ. <code>.edu.gr</code>) για
-              αποκλειστικές φοιτητικές προσφορές ή το εταιρικό σου email για{" "}
-              <strong>Office Lunch Break deals (13:00–16:00)</strong> χωρίς
-              ουρά.
+            <p className="text-xs text-text-muted leading-relaxed">
+              Δήλωσε το ακαδημαϊκό σου email (π.χ. <code>.edu.gr</code>) ή εταιρικό email για{" "}
+              <strong>Office Lunch Break deals (13:00–16:00)</strong>.
             </p>
 
             {verifiedPass && (
-              <div className="p-3 rounded-2xl bg-indigo-950/40 border border-indigo-500/40 flex items-center justify-between text-xs">
+              <div className="p-3 rounded-2xl bg-indigo-50 border border-indigo-200 flex items-center justify-between text-xs">
                 <div>
-                  <div className="font-bold text-indigo-300">
+                  <div className="font-bold text-indigo-700">
                     Ενεργό:{" "}
                     {verifiedPass.type === "student"
                       ? "🎓 Φοιτητικό Πάσο"
                       : "💼 Office Break Pass"}
                   </div>
-                  <div className="text-neutral-400">{verifiedPass.email}</div>
+                  <div className="text-text-muted">{verifiedPass.email}</div>
                 </div>
                 <button
                   onClick={() => {
                     setVerifiedPass(null);
                     localStorage.removeItem("happyseats_microzone_pass");
                   }}
-                  className="text-red-400 hover:underline font-semibold cursor-pointer"
+                  className="text-red-600 hover:underline font-semibold cursor-pointer"
                 >
                   Αφαίρεση
                 </button>
@@ -1331,19 +1202,19 @@ export default function Home() {
                 placeholder="π.χ. name@aegean.gr ή name@company.com"
                 value={passEmailInput}
                 onChange={(e) => setPassEmailInput(e.target.value)}
-                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400"
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand"
               />
               <div className="flex gap-2">
                 <button
                   type="button"
                   onClick={() => setShowPassModal(false)}
-                  className="flex-1 py-2.5 bg-neutral-800 rounded-xl text-xs font-semibold hover:bg-neutral-700 transition cursor-pointer"
+                  className="flex-1 py-2.5 bg-subtle rounded-xl text-xs font-semibold hover:bg-border-theme text-text-main transition cursor-pointer"
                 >
                   Κλείσιμο
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2.5 bg-amber-400 text-neutral-950 rounded-xl text-xs font-bold hover:bg-amber-300 transition cursor-pointer"
+                  className="flex-1 py-2.5 bg-brand text-white rounded-xl text-xs font-bold hover:bg-brand-hover transition cursor-pointer shadow-sm"
                 >
                   Ενεργοποίηση Πάσου
                 </button>
@@ -1355,21 +1226,20 @@ export default function Home() {
 
       {/* Pop-up Επιβεβαίωσης Κράτησης */}
       {selectedSlot && selectedVenue && (
-        <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
-          <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl max-w-sm w-full space-y-4 shadow-2xl">
-            <h3 className="font-bold text-lg text-white">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-card border border-border-theme p-6 rounded-3xl max-w-sm w-full space-y-4 shadow-2xl">
+            <h3 className="font-bold text-lg text-text-main">
               Επιβεβαίωση Κράτησης
             </h3>
-            <p className="text-sm text-neutral-300">
+            <p className="text-sm text-text-muted">
               {selectedVenue.name} ({selectedSlot.timeWindow})
             </p>
-            <div className="text-xs text-amber-400 font-semibold">
+            <div className="text-xs text-brand-text font-bold">
               {selectedSlot.discount}
             </div>
 
-            {/* Επιλογή Τραπέζι ή Παραλαβή Take-away */}
             <div>
-              <label className="block text-xs text-neutral-400 mb-1">
+              <label className="block text-xs text-text-muted font-medium mb-1">
                 Τρόπος Εξυπηρέτησης:
               </label>
               <div className="grid grid-cols-2 gap-2">
@@ -1379,8 +1249,8 @@ export default function Home() {
                   onClick={() => setOrderMode("dine-in")}
                   className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
                     orderMode === "dine-in"
-                      ? "bg-amber-400 text-neutral-950 border-amber-300"
-                      : "bg-neutral-950 text-neutral-400 border-neutral-800"
+                      ? "bg-brand text-white border-brand shadow-sm"
+                      : "bg-subtle text-text-main border-border-theme"
                   } disabled:opacity-40`}
                 >
                   🍽️ Τραπέζι
@@ -1391,8 +1261,8 @@ export default function Home() {
                   onClick={() => setOrderMode("takeaway")}
                   className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
                     orderMode === "takeaway"
-                      ? "bg-amber-400 text-neutral-950 border-amber-300"
-                      : "bg-neutral-950 text-neutral-400 border-neutral-800"
+                      ? "bg-brand text-white border-brand shadow-sm"
+                      : "bg-subtle text-text-main border-border-theme"
                   } disabled:opacity-40`}
                 >
                   🛍️ Παραλαβή
@@ -1402,13 +1272,13 @@ export default function Home() {
 
             {orderMode === "dine-in" && (
               <div>
-                <label className="block text-xs text-neutral-400 mb-1">
+                <label className="block text-xs text-text-muted font-medium mb-1">
                   Αριθμός Ατόμων:
                 </label>
                 <select
                   value={partySize}
                   onChange={(e) => setPartySize(Number(e.target.value))}
-                  className="w-full bg-neutral-950 border border-neutral-800 rounded-xl p-2.5 text-sm text-white focus:outline-none"
+                  className="w-full bg-subtle border border-border-theme rounded-xl p-2.5 text-sm text-text-main focus:outline-none focus:border-brand cursor-pointer"
                 >
                   {[1, 2, 3, 4, 5, 6, 8].map((num) => (
                     <option key={num} value={num}>
@@ -1423,7 +1293,7 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => setSelectedSlot(null)}
-                className="flex-1 py-2.5 bg-neutral-800 rounded-xl text-sm font-semibold hover:bg-neutral-700 transition cursor-pointer"
+                className="flex-1 py-2.5 bg-subtle rounded-xl text-sm font-semibold hover:bg-border-theme text-text-main transition cursor-pointer"
               >
                 Άκυρο
               </button>
@@ -1431,7 +1301,7 @@ export default function Home() {
                 type="button"
                 disabled={isSubmitting}
                 onClick={handleBooking}
-                className="flex-1 py-2.5 bg-amber-400 text-neutral-950 rounded-xl text-sm font-bold hover:bg-amber-300 transition disabled:opacity-50 cursor-pointer"
+                className="flex-1 py-2.5 bg-brand text-white rounded-xl text-sm font-bold hover:bg-brand-hover transition disabled:opacity-50 cursor-pointer shadow-sm"
               >
                 {isSubmitting ? "Έκδοση..." : "Έκδοση Ticket"}
               </button>

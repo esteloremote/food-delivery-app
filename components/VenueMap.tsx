@@ -15,13 +15,12 @@ export interface MapVenue {
   lat: number;
   lng: number;
   bestDiscount: string;
-  // --- ΝΕΑ ΠΕΔΙΑ (2, 3, 4, 6, 7) ---
-  tableStatus?: TableStatus; // #7: "plenty" (Άνετο) | "few" (1-3 Τραπέζια) | "full" (Πλήρες)
-  takeawayReady?: boolean;   // #7: Άμεση παραλαβή
-  panicDealActive?: boolean; // #2: Dynamic "Fill the Table" (π.χ. -30% για 1 ώρα)
-  panicDealText?: string;    // #2: π.χ. "-30% στα επόμενα 3 τραπέζια!"
-  vibeTags?: string[];       // #4: π.χ. ["☀️ Ήλιος έξω", "🔥 Σόμπες", "⚽ Δείχνει Αγώνα"]
-  microZoneType?: "student" | "office" | null; // #6: Φοιτητικό / Office Break
+  tableStatus?: TableStatus;
+  takeawayReady?: boolean;
+  panicDealActive?: boolean;
+  panicDealText?: string;
+  vibeTags?: string[];
+  microZoneType?: "student" | "office" | null;
 }
 
 interface GeocodedVenue extends MapVenue {
@@ -29,73 +28,116 @@ interface GeocodedVenue extends MapVenue {
   resolvedLng: number;
 }
 
-// Δυναμικό εικονίδιο πινέζας ανάλογα με το αν τρέχει Panic Deal (#2) ή αν είναι Πλήρες (#7)
-const getCustomIcon = (venue: MapVenue) => {
-  const isPanic = venue.panicDealActive;
-  const isFull = venue.tableStatus === "full";
-
-  const bgColor = isPanic
-    ? "#ef4444" // Κόκκινο για Flash/Panic Deal
-    : isFull
-    ? "#64748b" // Γκρι αν είναι Πλήρες
-    : "#f59e0b"; // Κλασικό Amber HappySeats
-
-  const emoji = isPanic ? "🔥" : isFull ? "⏳" : "🍽️";
-  const pulseRing = isPanic
-    ? `box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.35), 0 4px 12px rgba(0,0,0,0.6);`
-    : `box-shadow: 0 4px 12px rgba(0,0,0,0.6);`;
-
+// Δημιουργία πινέζας με Badge Έκπτωσης (Σημείο 10)
+const createDiscountPinIcon = (discount: string) => {
   return L.divIcon({
-    className: "custom-map-pin",
+    className: "custom-venue-pin",
     html: `
-      <div style="
-        background-color: ${bgColor};
-        width: 36px;
-        height: 36px;
-        border-radius: 50% 50% 50% 0;
-        transform: rotate(-45deg);
-        border: 2px solid #020617;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        ${pulseRing}
-      ">
-        <span style="
-          transform: rotate(45deg);
-          font-size: 16px;
-        ">${emoji}</span>
+      <div style="position: relative; display: flex; flex-direction: column; align-items: center;">
+        <div style="
+          background: var(--brand-primary, #f97316);
+          color: #ffffff;
+          font-weight: 900;
+          font-size: 11px;
+          padding: 2px 7px;
+          border-radius: 8px;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+          border: 1.5px solid #ffffff;
+          white-space: nowrap;
+          margin-bottom: 2px;
+        ">
+          ${discount}
+        </div>
+        <div style="
+          background-color: var(--brand-primary, #f97316);
+          width: 30px;
+          height: 30px;
+          border-radius: 50% 50% 50% 0;
+          transform: rotate(-45deg);
+          border: 2px solid #ffffff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          box-shadow: 0 4px 10px rgba(0,0,0,0.25);
+        ">
+          <span style="transform: rotate(45deg); font-size: 14px;">🍽️</span>
+        </div>
       </div>
     `,
-    iconSize: [36, 36],
-    iconAnchor: [18, 36],
-    popupAnchor: [0, -36],
+    iconSize: [42, 54],
+    iconAnchor: [21, 54],
+    popupAnchor: [0, -50],
   });
 };
 
-// Επανυπολογισμός εστίασης του χάρτη στις νέες συντεταγμένες
-function MapBoundsUpdater({ venues }: { venues: GeocodedVenue[] }) {
+// Μπλε πινέζα για τη θέση του χρήστη (Σημείο 9)
+const userLocationIcon = L.divIcon({
+  className: "custom-user-pin",
+  html: `
+    <div style="position: relative; display: flex; align-items: center; justify-content: center;">
+      <div style="
+        position: absolute;
+        width: 32px;
+        height: 32px;
+        background: rgba(59, 130, 246, 0.3);
+        border-radius: 50%;
+        animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+      "></div>
+      <div style="
+        width: 18px;
+        height: 18px;
+        background: #3b82f6;
+        border: 3px solid #ffffff;
+        border-radius: 50%;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+      "></div>
+    </div>
+  `,
+  iconSize: [32, 32],
+  iconAnchor: [16, 16],
+  popupAnchor: [0, -16],
+});
+
+function MapBoundsUpdater({
+  venues,
+  userPos,
+}: {
+  venues: GeocodedVenue[];
+  userPos: [number, number] | null;
+}) {
   const map = useMap();
 
   useEffect(() => {
+    if (userPos && venues.length === 0) {
+      map.setView(userPos, 15);
+      return;
+    }
     if (venues.length === 0) return;
 
-    if (venues.length === 1) {
-      map.setView([venues[0].resolvedLat, venues[0].resolvedLng], 16);
+    if (venues.length === 1 && !userPos) {
+      map.setView([venues[0].resolvedLat, venues[0].resolvedLng], 15);
     } else {
-      const bounds = L.latLngBounds(
-        venues.map((v) => [v.resolvedLat, v.resolvedLng])
-      );
+      const points: [number, number][] = venues.map((v) => [
+        v.resolvedLat,
+        v.resolvedLng,
+      ]);
+      if (userPos) points.push(userPos);
+      const bounds = L.latLngBounds(points);
       map.fitBounds(bounds, { padding: [50, 50] });
     }
-  }, [venues, map]);
+  }, [venues, userPos, map]);
 
   return null;
 }
 
 export default function VenueMap({ venues }: { venues: MapVenue[] }) {
   const [resolvedVenues, setResolvedVenues] = useState<GeocodedVenue[]>([]);
-  const [lockedVenueName, setLockedVenueName] = useState<string | null>(null);
+  const [userPosition, setUserPosition] = useState<[number, number] | null>(
+    null
+  );
+  const [locating, setLocating] = useState(false);
 
+  // Αυτόματος εντοπισμός διεύθυνσης
   useEffect(() => {
     let isCancelled = false;
 
@@ -115,7 +157,6 @@ export default function VenueMap({ venues }: { venues: MapVenue[] }) {
               )}`
             );
             const data = await res.json();
-
             if (data && data.length > 0) {
               finalLat = parseFloat(data[0].lat);
               finalLng = parseFloat(data[0].lon);
@@ -138,68 +179,55 @@ export default function VenueMap({ venues }: { venues: MapVenue[] }) {
     };
 
     resolveAddresses();
-
     return () => {
       isCancelled = true;
     };
   }, [venues]);
 
-  // #3: Λειτουργία «Κλείδωμα Παρέας» (Hold 15 mins & Share)
-  const handleSquadLock = async (venue: GeocodedVenue) => {
-    setLockedVenueName(venue.name);
-    const shareText = `🍻 Έκλεισα τραπέζι στο ${venue.name} (${venue.area}) με έκπτωση ${venue.bestDiscount}! Έχουμε 15 λεπτά να επιβεβαιώσουμε. Είστε μέσα;`;
-    const shareUrl = window.location.href;
-
-    if (navigator.share) {
-      try {
-        await navigator.share({
-          title: `HappySeats - ${venue.name}`,
-          text: shareText,
-          url: shareUrl,
-        });
-      } catch {
-        // Ο χρήστης έκλεισε το share sheet
-      }
-    } else {
-      await navigator.clipboard.writeText(`${shareText} ${shareUrl}`);
-      alert("Το link για την παρέα αντιγράφηκε! Στείλτο σε Viber/WhatsApp (Ισχύει για 15 λεπτά).");
+  // Εντοπισμός Τοποθεσίας Χρήστη (Σημείο 9)
+  const handleLocateMe = () => {
+    if (!navigator.geolocation) {
+      alert("Η γεωγραφική τοποθεσία δεν υποστηρίζεται από τον browser σας.");
+      return;
     }
-  };
-
-  // Helper για το badge διαθεσιμότητας (#7)
-  const renderAvailabilityBadge = (status?: TableStatus) => {
-    switch (status) {
-      case "full":
-        return (
-          <span className="text-[10px] font-bold bg-red-100 text-red-700 px-2 py-0.5 rounded-full">
-            🔴 Πλήρες Τραπεζιών
-          </span>
-        );
-      case "few":
-        return (
-          <span className="text-[10px] font-bold bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">
-            🟠 1-3 Τραπέζια
-          </span>
-        );
-      default:
-        return (
-          <span className="text-[10px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full">
-            🟢 Άνετο για Παρέα
-          </span>
-        );
-    }
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setUserPosition([pos.coords.latitude, pos.coords.longitude]);
+        setLocating(false);
+      },
+      (err) => {
+        console.warn("Geolocation error:", err);
+        alert("Δεν ήταν δυνατή η ανάκτηση της τοποθεσίας σας. Βεβαιωθείτε ότι έχετε δώσει δικαίωμα πρόσβασης.");
+        setLocating(false);
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
   };
 
   const centerLat =
-    resolvedVenues.length > 0 ? resolvedVenues[0].resolvedLat : 37.9838;
+    userPosition?.[0] ?? (resolvedVenues[0]?.resolvedLat || 37.9838);
   const centerLng =
-    resolvedVenues.length > 0 ? resolvedVenues[0].resolvedLng : 23.7275;
+    userPosition?.[1] ?? (resolvedVenues[0]?.resolvedLng || 23.7275);
 
   return (
     <div className="w-full h-84 md:h-96 rounded-3xl overflow-hidden border border-neutral-800 shadow-2xl my-6 relative z-0">
+      {/* Κουμπί «Η Τοποθεσία μου» */}
+      <div className="absolute top-4 right-4 z-[500]">
+        <button
+          type="button"
+          onClick={handleLocateMe}
+          disabled={locating}
+          className="bg-neutral-900/90 hover:bg-neutral-900 text-white border border-neutral-700 px-3 py-2 rounded-xl text-xs font-bold shadow-xl flex items-center gap-1.5 backdrop-blur-md transition cursor-pointer"
+        >
+          <span>📍</span>
+          <span>{locating ? "Εντοπισμός..." : "Η Τοποθεσία μου"}</span>
+        </button>
+      </div>
+
       <MapContainer
         center={[centerLat, centerLng]}
-        zoom={15}
+        zoom={14}
         scrollWheelZoom={false}
         className="w-full h-full"
       >
@@ -208,72 +236,37 @@ export default function VenueMap({ venues }: { venues: MapVenue[] }) {
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        <MapBoundsUpdater venues={resolvedVenues} />
+        <MapBoundsUpdater venues={resolvedVenues} userPos={userPosition} />
 
+        {/* Πινέζα Χρήστη */}
+        {userPosition && (
+          <Marker position={userPosition} icon={userLocationIcon}>
+            <Popup>
+              <div className="p-1 font-bold text-xs text-slate-900">
+                📍 Είστε εδώ!
+              </div>
+            </Popup>
+          </Marker>
+        )}
+
+        {/* Πινέζες Καταστημάτων με ποσοστό έκπτωσης */}
         {resolvedVenues.map((v, idx) => (
           <Marker
             key={`${v.name}-${idx}`}
             position={[v.resolvedLat, v.resolvedLng]}
-            icon={getCustomIcon(v)}
+            icon={createDiscountPinIcon(v.bestDiscount)}
           >
             <Popup className="custom-leaflet-popup">
-              <div className="p-1 space-y-2 min-w-[220px]">
-                {/* #2: Panic Button / Fill the Table Alert */}
-                {v.panicDealActive && (
-                  <div className="bg-red-600 text-white text-[10px] font-extrabold px-2 py-1 rounded-lg flex items-center justify-between animate-pulse">
-                    <span>🔥 FLASH ΤΡΑΠΕΖΙ ΤΩΡΑ</span>
-                    <span>{v.panicDealText || "-30% για 1 ώρα"}</span>
-                  </div>
-                )}
+              <div className="p-1 space-y-1.5 min-w-[190px]">
+                <h4 className="font-black text-slate-900 text-sm leading-tight">
+                  {v.name}
+                </h4>
 
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <h4 className="font-black text-slate-900 text-sm leading-tight">
-                      {v.name}
-                    </h4>
-                    <div className="text-[11px] text-slate-600 font-medium">
-                      {v.category}
-                    </div>
-                  </div>
-
-                  {/* #6: Micro-Zone Badge */}
-                  {v.microZoneType === "student" && (
-                    <span className="text-[9px] font-bold bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded">
-                      🎓 Φοιτητικό
-                    </span>
-                  )}
-                  {v.microZoneType === "office" && (
-                    <span className="text-[9px] font-bold bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded">
-                      💼 Office Break
-                    </span>
-                  )}
+                <div className="text-[11px] text-slate-600 font-medium">
+                  {v.category}
                 </div>
 
-                {/* #7: Live Table Status & Take-away */}
-                <div className="flex flex-wrap items-center gap-1">
-                  {renderAvailabilityBadge(v.tableStatus)}
-                  {v.takeawayReady !== false && (
-                    <span className="text-[10px] font-semibold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full">
-                      🛍️ Take-away
-                    </span>
-                  )}
-                </div>
-
-                {/* #4: Live Vibe & Weather Tags */}
-                {v.vibeTags && v.vibeTags.length > 0 && (
-                  <div className="flex flex-wrap gap-1 pt-0.5">
-                    {v.vibeTags.map((tag, i) => (
-                      <span
-                        key={i}
-                        className="text-[9px] bg-amber-50 text-amber-900 border border-amber-200 px-1.5 py-0.5 rounded-md font-medium"
-                      >
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                )}
-
-                <div className="text-[11px] text-slate-800 bg-slate-100 p-1.5 rounded-xl border border-slate-200">
+                <div className="text-[11px] text-slate-800 bg-slate-100 p-2 rounded-xl border border-slate-200">
                   📍 <strong>{v.address || v.area}</strong>
                 </div>
 
@@ -284,7 +277,7 @@ export default function VenueMap({ venues }: { venues: MapVenue[] }) {
 
                   <a
                     href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-                      `${v.name} ${v.address || v.area}`
+                      `${v.name}${v.address || v.area}`
                     )}`}
                     target="_blank"
                     rel="noopener noreferrer"
@@ -293,18 +286,6 @@ export default function VenueMap({ venues }: { venues: MapVenue[] }) {
                     Οδηγίες →
                   </a>
                 </div>
-
-                {/* #3: Κλείδωμα Παρέας (Hold 15 mins) */}
-                {v.tableStatus !== "full" && (
-                  <button
-                    onClick={() => handleSquadLock(v)}
-                    className="w-full mt-1 bg-slate-900 hover:bg-slate-800 text-amber-400 text-[11px] font-bold py-1.5 px-2 rounded-xl transition flex items-center justify-center gap-1 cursor-pointer"
-                  >
-                    {lockedVenueName === v.name
-                      ? "✅ Κλειδώθηκε (15') - Στείλτο!"
-                      : "🤝 Κράτα το για την παρέα (15')"}
-                  </button>
-                )}
               </div>
             </Popup>
           </Marker>

@@ -1,320 +1,313 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { onAuthStateChanged } from "firebase/auth";
+import { Scanner } from "@yudiel/react-qr-scanner";
+import { onAuthStateChanged, User } from "firebase/auth";
 import {
   collection,
   query,
   where,
   getDocs,
+  getDoc,
   updateDoc,
   doc,
+  serverTimestamp,
 } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 
-interface ScannedTicket {
-  id: string;
-  ticketCode: string;
-  venueName: string;
-  partySize: number;
-  timeWindow: string;
-  discount: string;
-  status: string;
-}
-
-interface ScannerInstance {
-  render: (
-    onSuccess: (decodedText: string) => void,
-    onError: () => void
-  ) => void;
-  clear: () => Promise<void>;
-  getState: () => number;
-}
-
-export default function TicketScannerPage() {
+export default function MerchantScanPage() {
   const router = useRouter();
-  const [authChecking, setAuthChecking] = useState(true);
-  const [ticketData, setTicketData] = useState<ScannedTicket | null>(null);
-  const [scanError, setScanError] = useState<string | null>(null);
-  const [manualCode, setManualCode] = useState("");
-  const [isProcessing, setIsProcessing] = useState(false);
-  const scannerRef = useRef<ScannerInstance | null>(null);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [isAuthorizedMerchant, setIsAuthorizedMerchant] = useState(false);
+  const [ownedVenueNames, setOwnedVenueNames] = useState<string[]>([]);
 
-  // Έλεγχος Auth
+  const [ticketInput, setTicketInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [scanResult, setScanResult] = useState<{
+    success: boolean;
+    message: string;
+    ticketCode?: string;
+    venueName?: string;
+    partySize?: number;
+    discount?: string;
+    timeWindow?: string;
+  } | null>(null);
+
+  const [activeTab, setActiveTab] = useState<"camera" | "manual">("camera");
+
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (user) => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) {
+        setIsAuthorizedMerchant(false);
+        setAuthLoading(false);
         router.push("/merchant/login");
-      } else {
-        setAuthChecking(false);
+        return;
+      }
+
+      try {
+        const mSnap = await getDoc(doc(db, "merchants", user.uid));
+        const qEmail = query(
+          collection(db, "merchants"),
+          where("email", "==", user.email?.toLowerCase() || "")
+        );
+        const emailSnap = await getDocs(qEmail);
+
+        if (!mSnap.exists() && emailSnap.empty) {
+          setIsAuthorizedMerchant(false);
+          setAuthLoading(false);
+          return;
+        }
+
+        setCurrentUser(user);
+        setIsAuthorizedMerchant(true);
+
+        // Φόρτωση των ονομάτων καταστημάτων που ανήκουν στον συγκεκριμένο εστιάτορα
+        const qVenues = query(
+          collection(db, "venues"),
+          where("ownerEmail", "==", user.email?.toLowerCase() || "")
+        );
+        const vSnap = await getDocs(qVenues);
+        const names: string[] = [];
+        vSnap.forEach((d) => {
+          if (d.data().name) names.push(d.data().name);
+        });
+        setOwnedVenueNames(names);
+      } catch (err) {
+        console.error(err);
+        setIsAuthorizedMerchant(false);
+      } finally {
+        setAuthLoading(false);
       }
     });
+
     return () => unsub();
   }, [router]);
 
-  // Ήχος Beep επιτυχίας
-  const playSuccessSound = () => {
-    try {
-      const AudioCtx =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(880, ctx.currentTime);
-
-      gain.gain.setValueAtTime(0.2, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.25);
-
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-
-      osc.start();
-      osc.stop(ctx.currentTime + 0.25);
-    } catch (e) {
-      console.log("Audio not supported or blocked:", e);
+  const verifyTicket = async (rawCode: string) => {
+    let cleanCode = rawCode.trim();
+    if (cleanCode.startsWith("HAPPYSEATS:")) {
+      cleanCode = cleanCode.replace("HAPPYSEATS:", "").split("|")[0];
     }
-  };
 
-  // Δόνηση κινητού
-  const triggerHaptic = () => {
-    if (typeof navigator !== "undefined" && navigator.vibrate) {
-      navigator.vibrate(150);
-    }
-  };
-
-  const verifyAndCheckIn = useCallback(async (codeToVerify: string) => {
-    setIsProcessing(true);
-    setScanError(null);
+    if (!cleanCode) return;
+    setLoading(true);
+    setScanResult(null);
 
     try {
-      let cleanCode = codeToVerify.trim();
-      if (cleanCode.includes("HAPPYSEATS:")) {
-        const parts = cleanCode.replace("HAPPYSEATS:", "").split("|");
-        cleanCode = parts[0];
-      }
-
       const q = query(
         collection(db, "bookings"),
         where("ticketCode", "==", cleanCode)
       );
-      const querySnapshot = await getDocs(q);
+      const snapshot = await getDocs(q);
 
-      if (querySnapshot.empty) {
-        setScanError(`Δεν βρέθηκε κράτηση με κωδικό: ${cleanCode}`);
-        setTicketData(null);
+      if (snapshot.empty) {
+        setScanResult({
+          success: false,
+          message: `Δεν βρέθηκε εισιτήριο με τον κωδικό: ${cleanCode}`,
+        });
         return;
       }
 
-      const docSnap = querySnapshot.docs[0];
-      const data = docSnap.data() as Omit<ScannedTicket, "id">;
+      const bookingDoc = snapshot.docs[0];
+      const data = bookingDoc.data();
 
-      await updateDoc(doc(db, "bookings", docSnap.id), {
+      // Έλεγχος ότι το εισιτήριο ανήκει σε κατάστημα του συνδεδεμένου εστιάτορα
+      if (
+        ownedVenueNames.length > 0 &&
+        !ownedVenueNames.includes(data.venueName)
+      ) {
+        setScanResult({
+          success: false,
+          message: `Αυτό το εισιτήριο ανήκει σε άλλο κατάστημα (${data.venueName})!`,
+        });
+        return;
+      }
+
+      if (data.status === "used" || data.status === "checked_in") {
+        setScanResult({
+          success: false,
+          message: `Το εισιτήριο ${cleanCode} έχει ΗΔΗ εξαργυρωθεί!`,
+          ticketCode: cleanCode,
+          venueName: data.venueName,
+          partySize: data.partySize,
+        });
+        return;
+      }
+
+      await updateDoc(doc(db, "bookings", bookingDoc.id), {
         status: "checked_in",
+        checkedInAt: serverTimestamp(),
+        checkedInBy: currentUser?.email || "",
       });
 
-      playSuccessSound();
-      triggerHaptic();
-
-      setTicketData({
-        id: docSnap.id,
-        ...data,
-        status: "checked_in",
+      setScanResult({
+        success: true,
+        message: `Επιτυχές Check-in! Τραπέζι για ${data.partySize} άτομα (${data.discount}).`,
+        ticketCode: cleanCode,
+        venueName: data.venueName,
+        partySize: data.partySize,
+        discount: data.discount,
+        timeWindow: data.timeWindow,
       });
+
+      setTicketInput("");
     } catch (err) {
-      console.error("Σφάλμα επικύρωσης:", err);
-      setScanError("Παρουσιάστηκε σφάλμα κατά την επικύρωση.");
+      console.error(err);
+      setScanResult({
+        success: false,
+        message: "Σφάλμα επικοινωνίας με τη βάση δεδομένων.",
+      });
     } finally {
-      setIsProcessing(false);
+      setLoading(false);
     }
-  }, []);
+  };
 
-  const verifyRef = useRef(verifyAndCheckIn);
-  useEffect(() => {
-    verifyRef.current = verifyAndCheckIn;
-  }, [verifyAndCheckIn]);
-
-  useEffect(() => {
-    if (authChecking) return;
-
-    let isMounted = true;
-
-    const container = document.getElementById("qr-reader");
-    if (container) {
-      container.innerHTML = "";
-    }
-
-    import("html5-qrcode").then(({ Html5QrcodeScanner }) => {
-      if (!isMounted) return;
-
-      const scanner = new Html5QrcodeScanner(
-        "qr-reader",
-        {
-          fps: 10,
-          qrbox: { width: 250, height: 250 },
-          videoConstraints: {
-            facingMode: { ideal: "environment" },
-          },
-        },
-        false
-      );
-
-      scanner.render(
-        (decodedText: string) => {
-          verifyRef.current(decodedText);
-        },
-        () => {
-          // Ignored frame errors
-        }
-      );
-
-      scannerRef.current = scanner;
-    });
-
-    return () => {
-      isMounted = false;
-      if (scannerRef.current) {
-        try {
-          scannerRef.current.clear().catch((e) => console.log("Scanner cleanup:", e));
-        } catch (e) {
-          console.log("Scanner clear error:", e);
-        }
-        scannerRef.current = null;
-      }
-      const el = document.getElementById("qr-reader");
-      if (el) {
-        el.innerHTML = "";
-      }
-    };
-  }, [authChecking]);
-
-  if (authChecking) {
+  if (authLoading) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center text-sm">
-        Έλεγχος πρόσβασης...
+      <div className="min-h-screen bg-surface text-text-muted flex items-center justify-center text-sm">
+        Έλεγχος πρόσβασης Scanner...
+      </div>
+    );
+  }
+
+  if (!isAuthorizedMerchant) {
+    return (
+      <div className="min-h-screen bg-surface text-text-main flex flex-col items-center justify-center p-6 space-y-4">
+        <div className="w-16 h-16 bg-red-100 text-red-600 rounded-3xl flex items-center justify-center text-2xl font-bold">
+          🚫
+        </div>
+        <h1 className="text-xl font-black">Μη Εξουσιοδοτημένη Πρόσβαση</h1>
+        <p className="text-xs text-text-muted text-center max-w-sm">
+          Ο QR Scanner προορίζεται αποκλειστικά για εξουσιοδοτημένους συνεργάτες εστίασης.
+        </p>
+        <Link
+          href="/merchant/login"
+          className="px-4 py-2 bg-brand text-white rounded-xl text-xs font-bold shadow-sm"
+        >
+          Σύνδεση Συνεργάτη →
+        </Link>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-6 flex flex-col items-center">
-      <style jsx global>{`
-        #qr-reader {
-          border: none !important;
-          color: #f1f5f9 !important;
-        }
-        #qr-reader__scan_region {
-          background: #0f172a !important;
-          border-radius: 1rem;
-        }
-        #qr-reader__dashboard_section_csr span,
-        #qr-reader__dashboard_section_swaplink,
-        #qr-reader__header_message {
-          color: #cbd5e1 !important;
-          font-size: 0.85rem !important;
-        }
-        #qr-reader button {
-          background-color: #f59e0b !important;
-          color: #020617 !important;
-          font-weight: 700 !important;
-          border-radius: 0.75rem !important;
-          padding: 0.5rem 1rem !important;
-          border: none !important;
-          cursor: pointer !important;
-          margin: 0.5rem 0.25rem !important;
-          transition: background-color 0.2s ease !important;
-        }
-        #qr-reader button:hover {
-          background-color: #fbbf24 !important;
-        }
-        #qr-reader a {
-          color: #f59e0b !important;
-          text-decoration: underline !important;
-        }
-        #qr-reader select {
-          background-color: #020617 !important;
-          color: #f8fafc !important;
-          border: 1px solid #334155 !important;
-          padding: 0.4rem 0.75rem !important;
-          border-radius: 0.5rem !important;
-          margin-bottom: 0.5rem !important;
-        }
-        #qr-reader img {
-          filter: invert(1) !important;
-        }
-      `}</style>
-
-      <header className="w-full max-w-md flex justify-between items-center mb-6">
+    <div className="min-h-screen bg-surface text-text-main p-6 flex flex-col items-center">
+      <header className="w-full max-w-md flex justify-between items-center pb-6 border-b border-border-theme mb-6">
         <div>
-          <span className="text-xs font-bold uppercase tracking-widest text-amber-400">
-            Check-In Desk
+          <span className="text-xs font-bold uppercase tracking-widest text-brand-text">
+            Check-In Scanner
           </span>
-          <h1 className="text-2xl font-black">Έλεγχος e-Ticket</h1>
+          <h1 className="text-2xl font-black text-text-main">Έλεγχος Εισιτηρίου</h1>
         </div>
         <Link
           href="/merchant"
-          className="text-xs bg-slate-800 hover:bg-slate-700 px-3 py-2 rounded-xl transition"
+          className="text-xs bg-card hover:bg-subtle px-3.5 py-2 rounded-xl transition text-text-main border border-border-theme shadow-sm font-medium"
         >
-          ← Merchant Portal
+          ← Dashboard
         </Link>
       </header>
 
       <main className="w-full max-w-md space-y-6">
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-3xl overflow-hidden shadow-xl">
-          <div id="qr-reader" className="w-full overflow-hidden rounded-2xl" />
-        </div>
-
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl flex gap-2">
-          <input
-            type="text"
-            placeholder="ή γράψε τον κωδικό (π.χ. KOU-1234)"
-            value={manualCode}
-            onChange={(e) => setManualCode(e.target.value.toUpperCase())}
-            className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-400"
-          />
+        <div className="grid grid-cols-2 p-1 bg-subtle rounded-xl text-xs font-bold border border-border-theme">
           <button
-            onClick={() => verifyAndCheckIn(manualCode)}
-            disabled={isProcessing || !manualCode}
-            className="px-4 py-2 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-xl text-xs transition disabled:opacity-50"
+            type="button"
+            onClick={() => setActiveTab("camera")}
+            className={`py-2 rounded-lg transition cursor-pointer ${
+              activeTab === "camera"
+                ? "bg-card text-brand-text shadow-sm"
+                : "text-text-muted hover:text-text-main"
+            }`}
           >
-            Έλεγχος
+            📷 Κάμερα QR
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("manual")}
+            className={`py-2 rounded-lg transition cursor-pointer ${
+              activeTab === "manual"
+                ? "bg-card text-brand-text shadow-sm"
+                : "text-text-muted hover:text-text-main"
+            }`}
+          >
+            ⌨️ Πληκτρολόγηση
           </button>
         </div>
 
-        {scanError && (
-          <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-2xl text-red-400 text-sm text-center font-semibold">
-            ✕ {scanError}
+        {activeTab === "camera" ? (
+          <div className="bg-card border border-border-theme p-4 rounded-3xl overflow-hidden shadow-sm flex flex-col items-center">
+            <div className="w-full aspect-square max-w-[280px] rounded-2xl overflow-hidden border-2 border-brand relative">
+              <Scanner
+                onScan={(result: { rawValue: string }[]) => {
+                  if (result && result.length > 0 && !loading) {
+                    verifyTicket(result[0].rawValue);
+                  }
+                }}
+              />
+            </div>
+            <p className="text-xs text-text-muted mt-3 text-center">
+              Στρέψτε την κάμερα στο QR code του πελάτη.
+            </p>
           </div>
+        ) : (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              verifyTicket(ticketInput);
+            }}
+            className="bg-card border border-border-theme p-6 rounded-3xl shadow-sm space-y-4"
+          >
+            <div>
+              <label className="block text-xs font-semibold text-text-muted mb-1">
+                Κωδικός Ticket (π.χ. KAF-4821)
+              </label>
+              <input
+                type="text"
+                required
+                placeholder="π.χ. KAF-4821"
+                value={ticketInput}
+                onChange={(e) => setTicketInput(e.target.value.toUpperCase())}
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-3 text-base text-text-main font-mono focus:outline-none focus:border-brand tracking-wider text-center"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading || !ticketInput.trim()}
+              className="w-full py-3 bg-brand hover:bg-brand-hover text-white font-bold rounded-xl text-sm transition disabled:opacity-50 shadow-sm cursor-pointer"
+            >
+              {loading ? "Έλεγχος..." : "Εξαργύρωση Εισιτηρίου"}
+            </button>
+          </form>
         )}
 
-        {ticketData && (
-          <div className="p-6 bg-slate-900 border-2 border-emerald-400 rounded-3xl shadow-2xl space-y-3">
-            <div className="flex justify-between items-start">
-              <span className="text-xs uppercase tracking-wider font-bold bg-emerald-500/20 text-emerald-400 px-3 py-1 rounded-full">
-                ✓ Έγκυρο Ticket (Checked-In)
-              </span>
-              <span className="font-mono font-bold text-amber-400 text-sm">
-                {ticketData.ticketCode}
-              </span>
-            </div>
+        {scanResult && (
+          <div
+            className={`p-6 rounded-3xl border shadow-sm space-y-2 text-center transition ${
+              scanResult.success
+                ? "bg-emerald-50 border-emerald-300 text-emerald-900"
+                : "bg-red-50 border-red-300 text-red-900"
+            }`}
+          >
+            <div className="text-3xl">{scanResult.success ? "🎉" : "⚠️"}</div>
+            <h3 className="font-bold text-base">{scanResult.message}</h3>
 
-            <div className="pt-2">
-              <h2 className="text-xl font-black text-white">{ticketData.venueName}</h2>
-              <p className="text-slate-300 text-sm mt-1">
-                Τραπέζι για: <strong className="text-white">{ticketData.partySize} άτομα</strong>
-              </p>
-              <p className="text-slate-300 text-sm">
-                Χρονοθυρίδα: <strong className="text-white">{ticketData.timeWindow}</strong>
-              </p>
-              <p className="text-slate-300 text-sm">
-                Έκπτωση: <strong className="text-amber-400">{ticketData.discount}</strong>
-              </p>
-            </div>
+            {scanResult.ticketCode && (
+              <div className="pt-2 border-t border-border-theme text-xs text-text-muted space-y-1">
+                <div>
+                  Κωδικός:{" "}
+                  <strong className="font-mono text-text-main">{scanResult.ticketCode}</strong>
+                </div>
+                {scanResult.partySize && (
+                  <div>
+                    Άτομα: <strong className="text-text-main">{scanResult.partySize}</strong> | Ώρα:{" "}
+                    <strong className="text-text-main">{scanResult.timeWindow}</strong>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </main>

@@ -28,7 +28,6 @@ export default function MyTicketsPage() {
   const [tickets, setTickets] = useState<BookingRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Παρακολούθηση Auth
   useEffect(() => {
     const unsubAuth = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
@@ -36,7 +35,6 @@ export default function MyTicketsPage() {
     return () => unsubAuth();
   }, []);
 
-  // Ανάκτηση Εισιτηρίων (από User UID ή LocalStorage fallback)
   useEffect(() => {
     if (currentUser) {
       const q = query(
@@ -59,7 +57,6 @@ export default function MyTicketsPage() {
       const codes: string[] = stored ? JSON.parse(stored) : [];
 
       if (codes.length === 0) {
-        // Χρήση microtask για αποφυγή σύγχρονου cascading render
         queueMicrotask(() => {
           setTickets([]);
           setLoading(false);
@@ -104,24 +101,24 @@ export default function MyTicketsPage() {
   };
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 p-6">
-      <header className="max-w-4xl mx-auto flex items-center justify-between pb-6 border-b border-neutral-800">
+    <div className="min-h-screen bg-surface text-text-main p-6">
+      <header className="max-w-4xl mx-auto flex items-center justify-between pb-6 border-b border-border-theme">
         <div>
-          <Link href="/" className="text-xs text-neutral-400 hover:text-white transition">
+          <Link href="/" className="text-xs text-text-muted hover:text-text-main transition font-medium">
             ← Επιστροφή στην Αρχική
           </Link>
-          <h1 className="text-2xl font-black text-white mt-1">🎟️ Τα Εισιτήριά μου</h1>
+          <h1 className="text-2xl font-black text-text-main mt-1">🎟️ Τα Εισιτήριά μου</h1>
         </div>
 
         <div className="flex items-center gap-2">
           {currentUser ? (
             <div className="flex items-center gap-3">
-              <span className="text-xs text-neutral-400">
+              <span className="text-xs text-text-muted font-medium">
                 👤 {currentUser.displayName || currentUser.email}
               </span>
               <button
                 onClick={() => signOut(auth)}
-                className="text-xs px-3 py-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-white rounded-xl transition border border-neutral-800"
+                className="text-xs px-3 py-1.5 bg-card hover:bg-subtle text-text-muted hover:text-red-600 rounded-xl transition border border-border-theme shadow-sm cursor-pointer"
               >
                 Αποσύνδεση
               </button>
@@ -129,7 +126,7 @@ export default function MyTicketsPage() {
           ) : (
             <Link
               href="/login"
-              className="text-xs font-bold px-3.5 py-2 bg-amber-400 hover:bg-amber-300 text-neutral-950 rounded-xl transition shadow"
+              className="text-xs font-bold px-3.5 py-2 bg-brand hover:bg-brand-hover text-white rounded-xl transition shadow-sm"
             >
               Σύνδεση Πελάτη
             </Link>
@@ -139,13 +136,13 @@ export default function MyTicketsPage() {
 
       <main className="max-w-4xl mx-auto py-8 space-y-6">
         {!currentUser && (
-          <div className="p-4 bg-amber-400/10 border border-amber-400/20 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
-            <span className="text-amber-300">
+          <div className="p-4 bg-brand-light border border-brand-border rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+            <span className="text-brand-text">
               💡 <strong>Συμβουλή:</strong> Συνδεθείτε για να συγχρονίζονται αυτόματα τα εισιτήριά σας σε όλες τις συσκευές σας.
             </span>
             <Link
               href="/login"
-              className="px-3 py-1.5 bg-amber-400 text-neutral-950 font-bold rounded-lg shrink-0 hover:bg-amber-300 transition"
+              className="px-3 py-1.5 bg-brand text-white font-bold rounded-lg shrink-0 hover:bg-brand-hover transition shadow-sm"
             >
               Σύνδεση / Εγγραφή →
             </Link>
@@ -153,18 +150,18 @@ export default function MyTicketsPage() {
         )}
 
         {loading ? (
-          <div className="text-center py-20 text-neutral-500 text-sm">Φόρτωση εισιτηρίων...</div>
+          <div className="text-center py-20 text-text-muted text-sm">Φόρτωση εισιτηρίων...</div>
         ) : tickets.length === 0 ? (
-          <div className="bg-neutral-900 border border-neutral-800 p-12 rounded-3xl text-center space-y-3">
+          <div className="bg-card border border-border-theme p-12 rounded-3xl text-center space-y-3 shadow-sm">
             <span className="text-4xl">🎟️</span>
-            <h3 className="text-lg font-bold text-white">Δεν έχετε ενεργά εισιτήρια</h3>
-            <p className="text-xs text-neutral-400 max-w-sm mx-auto">
+            <h3 className="text-lg font-bold text-text-main">Δεν έχετε ενεργά εισιτήρια</h3>
+            <p className="text-xs text-text-muted max-w-sm mx-auto">
               Εξερευνήστε τις διαθέσιμες προσφορές στην αρχική σελίδα και κλείστε το τραπέζι σας με έκπτωση!
             </p>
             <div className="pt-2">
               <Link
                 href="/"
-                className="inline-block px-5 py-2.5 bg-amber-400 hover:bg-amber-300 text-neutral-950 font-bold rounded-xl text-xs transition"
+                className="inline-block px-5 py-2.5 bg-brand hover:bg-brand-hover text-white font-bold rounded-xl text-xs transition shadow-sm"
               >
                 Αναζήτηση Προσφορών →
               </Link>
@@ -178,10 +175,10 @@ export default function MyTicketsPage() {
               return (
                 <div
                   key={t.id}
-                  className={`bg-neutral-900 border rounded-3xl p-6 shadow-xl flex flex-col justify-between space-y-4 ${
+                  className={`bg-card border rounded-3xl p-6 shadow-sm flex flex-col justify-between space-y-4 transition ${
                     isUsed
-                      ? "border-neutral-800/60 opacity-60"
-                      : "border-neutral-700"
+                      ? "border-border-theme opacity-60"
+                      : "border-border-theme hover:border-brand shadow-sm"
                   }`}
                 >
                   <div className="flex justify-between items-start">
@@ -189,23 +186,23 @@ export default function MyTicketsPage() {
                       <span
                         className={`text-[10px] uppercase font-bold px-2.5 py-1 rounded-full ${
                           isUsed
-                            ? "bg-neutral-800 text-neutral-400"
-                            : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                            ? "bg-subtle text-text-muted"
+                            : "bg-emerald-50 text-emerald-700 border border-emerald-200"
                         }`}
                       >
                         {isUsed ? "Εξαργυρωμένο" : "✓ Ενεργό"}
                       </span>
-                      <h2 className="text-xl font-bold text-white mt-2">{t.venueName}</h2>
-                      <p className="text-xs text-neutral-400">
+                      <h2 className="text-xl font-bold text-text-main mt-2">{t.venueName}</h2>
+                      <p className="text-xs text-text-muted">
                         📅 {t.date} | ⏰ {t.timeWindow}
                       </p>
-                      <p className="text-xs text-neutral-300 mt-1">
+                      <p className="text-xs text-text-main mt-1">
                         👥 {t.partySize} άτομα | Έκπτωση:{" "}
-                        <strong className="text-amber-400">{t.discount}</strong>
+                        <strong className="text-brand-text font-bold">{t.discount}</strong>
                       </p>
                     </div>
 
-                    <div className="bg-white p-2.5 rounded-xl shrink-0">
+                    <div className="bg-subtle border border-border-theme p-2.5 rounded-xl shrink-0">
                       <QRCodeSVG
                         value={`HAPPYSEATS:${t.ticketCode}|${t.venueName}|${t.partySize}P`}
                         size={90}
@@ -213,14 +210,14 @@ export default function MyTicketsPage() {
                     </div>
                   </div>
 
-                  <div className="pt-3 border-t border-neutral-800 flex items-center justify-between">
-                    <span className="font-mono font-bold text-amber-400 text-sm">
+                  <div className="pt-3 border-t border-border-theme flex items-center justify-between">
+                    <span className="font-mono font-bold text-brand-text text-sm">
                       {t.ticketCode}
                     </span>
 
                     <button
                       onClick={() => handleShare(t)}
-                      className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white rounded-xl text-xs font-semibold transition flex items-center gap-1"
+                      className="px-3 py-1.5 bg-subtle hover:bg-border-theme text-text-main rounded-xl text-xs font-semibold transition flex items-center gap-1 cursor-pointer border border-border-theme"
                     >
                       <span>📲</span> Κοινοποίηση
                     </button>

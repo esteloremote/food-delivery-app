@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, useEffect, use } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { onAuthStateChanged, User } from "firebase/auth";
 import {
   collection,
   query,
@@ -13,7 +15,7 @@ import {
   runTransaction,
   serverTimestamp,
 } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { auth, db } from "@/lib/firebase";
 
 interface SlotDeal {
   id: string;
@@ -37,6 +39,8 @@ interface VenueDetails {
   description: string;
   image: string;
   highlights: string[];
+  isPublished?: boolean;
+  subscriptionStatus?: string;
 }
 
 export default function VenueProfilePage({
@@ -44,9 +48,11 @@ export default function VenueProfilePage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  const router = useRouter();
   const resolvedParams = use(params);
   const venueIdOrSlug = resolvedParams.id;
 
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [venue, setVenue] = useState<VenueDetails | null>(null);
   const [venueLoading, setVenueLoading] = useState(true);
   const [slots, setSlots] = useState<SlotDeal[]>([]);
@@ -55,19 +61,23 @@ export default function VenueProfilePage({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [bookingSuccessCode, setBookingSuccessCode] = useState<string | null>(null);
 
-  // Ανάκτηση στοιχείων καταστήματος από Firestore
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+    });
+    return () => unsub();
+  }, []);
+
   useEffect(() => {
     const fetchVenue = async () => {
       setVenueLoading(true);
       try {
-        // 1. Δοκιμή με Document ID
         const docRef = doc(db, "venues", venueIdOrSlug);
         const docSnap = await getDoc(docRef);
 
         if (docSnap.exists()) {
           setVenue({ id: docSnap.id, ...(docSnap.data() as Omit<VenueDetails, "id">) });
         } else {
-          // 2. Εναλλακτική αναζήτηση με βάση το slug
           const qSlug = query(collection(db, "venues"), where("slug", "==", venueIdOrSlug));
           const querySnap = await getDocs(qSlug);
           if (!querySnap.empty) {
@@ -87,12 +97,10 @@ export default function VenueProfilePage({
     fetchVenue();
   }, [venueIdOrSlug]);
 
-  // Real-time συγχρονισμός των slots του συγκεκριμένου μαγαζιού
   useEffect(() => {
     if (!venue) return;
 
     const q = query(collection(db, "slots"), where("venueName", "==", venue.name));
-
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const list: SlotDeal[] = [];
       snapshot.forEach((d) => {
@@ -106,16 +114,21 @@ export default function VenueProfilePage({
 
   const handleBooking = async () => {
     if (!venue || !selectedSlot || selectedSlot.availableTables <= 0) return;
-    setIsSubmitting(true);
 
+    if (!currentUser) {
+      alert("Παρακαλώ συνδεθείτε για να ολοκληρώσετε την κράτηση.");
+      router.push("/login");
+      return;
+    }
+
+    setIsSubmitting(true);
     const cleanPrefix = venue.name.substring(0, 3).toUpperCase();
     const code = `${cleanPrefix}-${Math.floor(1000 + Math.random() * 9000)}`;
     const todayDate = new Date().toLocaleDateString("el-GR");
 
     try {
       const slotRef = doc(db, "slots", selectedSlot.id);
-      const bookingsCollectionRef = collection(db, "bookings");
-      const newBookingRef = doc(bookingsCollectionRef);
+      const newBookingRef = doc(collection(db, "bookings"));
 
       await runTransaction(db, async (transaction) => {
         const slotSnap = await transaction.get(slotRef);
@@ -138,6 +151,8 @@ export default function VenueProfilePage({
           venueId: venue.id,
           slotId: selectedSlot.id,
           status: "confirmed",
+          customerId: currentUser.uid,
+          customerEmail: currentUser.email,
           createdAt: serverTimestamp(),
         });
       });
@@ -160,22 +175,26 @@ export default function VenueProfilePage({
 
   if (venueLoading) {
     return (
-      <div className="min-h-screen bg-neutral-950 text-neutral-400 flex items-center justify-center text-sm">
+      <div className="min-h-screen bg-surface text-text-muted flex items-center justify-center text-sm">
         Φόρτωση καταστήματος...
       </div>
     );
   }
 
-  if (!venue) {
+  if (
+    !venue ||
+    venue.isPublished === false ||
+    venue.subscriptionStatus === "past_due"
+  ) {
     return (
-      <div className="min-h-screen bg-neutral-950 text-white flex flex-col items-center justify-center p-6 space-y-4">
-        <h1 className="text-2xl font-bold">Το κατάστημα δεν βρέθηκε</h1>
-        <p className="text-neutral-400 text-sm">
-          Το κατάστημα που αναζητάτε δεν υπάρχει ή έχει αφαιρεθεί.
+      <div className="min-h-screen bg-surface text-text-main flex flex-col items-center justify-center p-6 space-y-4">
+        <h1 className="text-2xl font-bold">Το κατάστημα δεν είναι διαθέσιμο</h1>
+        <p className="text-text-muted text-sm text-center max-w-md">
+          Το κατάστημα που αναζητάτε δεν δέχεται κρατήσεις αυτή τη στιγμή ή έχει αφαιρεθεί.
         </p>
         <Link
           href="/"
-          className="px-4 py-2 bg-amber-400 text-neutral-950 rounded-xl text-xs font-bold"
+          className="px-4 py-2 bg-brand text-white rounded-xl text-xs font-bold shadow-sm"
         >
           ← Επιστροφή στην Αρχική
         </Link>
@@ -184,26 +203,28 @@ export default function VenueProfilePage({
   }
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 pb-16">
-      {/* Cover Image */}
+    <div className="min-h-screen bg-surface text-text-main pb-16">
       <div className="relative w-full h-72 md:h-96">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={venue.image || "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=80"}
+          src={
+            venue.image ||
+            "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=80"
+          }
           alt={venue.name}
           className="w-full h-full object-cover"
         />
-        <div className="absolute inset-0 bg-gradient-to-t from-neutral-950 via-neutral-950/40 to-transparent" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
         <div className="absolute top-6 left-6 right-6 max-w-5xl mx-auto flex justify-between items-center">
           <Link
             href="/"
-            className="px-3.5 py-2 bg-neutral-900/80 hover:bg-neutral-900 backdrop-blur-md rounded-xl text-xs font-semibold border border-neutral-700 transition"
+            className="px-3.5 py-2 bg-card/90 hover:bg-card text-text-main backdrop-blur-md rounded-xl text-xs font-semibold border border-border-theme transition shadow-sm"
           >
             ← Επιστροφή
           </Link>
           <Link
             href="/my-tickets"
-            className="px-3.5 py-2 bg-neutral-900/80 hover:bg-neutral-900 backdrop-blur-md rounded-xl text-xs font-semibold border border-neutral-700 transition"
+            className="px-3.5 py-2 bg-card/90 hover:bg-card text-text-main backdrop-blur-md rounded-xl text-xs font-semibold border border-border-theme transition shadow-sm"
           >
             🎟️ Τα Εισιτήριά μου
           </Link>
@@ -211,15 +232,14 @@ export default function VenueProfilePage({
       </div>
 
       <main className="max-w-4xl mx-auto px-6 -mt-16 relative z-10 space-y-8">
-        {/* Header Profile Box */}
-        <div className="bg-neutral-900 border border-neutral-800 p-6 md:p-8 rounded-3xl shadow-2xl space-y-4">
+        <div className="bg-card border border-border-theme p-6 md:p-8 rounded-3xl shadow-lg space-y-4">
           <div className="flex flex-col md:flex-row justify-between md:items-start gap-4">
             <div>
-              <span className="text-xs font-bold uppercase tracking-wider text-amber-400">
+              <span className="text-xs font-bold uppercase tracking-wider text-brand-text bg-brand-light px-2.5 py-1 rounded-md border border-brand-border">
                 {venue.category}
               </span>
-              <h1 className="text-3xl font-black text-white mt-1">{venue.name}</h1>
-              <p className="text-sm text-neutral-400 mt-1">{venue.area}</p>
+              <h1 className="text-3xl font-black text-text-main mt-2">{venue.name}</h1>
+              <p className="text-sm text-text-muted mt-1">📍 {venue.area}</p>
             </div>
             <a
               href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
@@ -227,63 +247,64 @@ export default function VenueProfilePage({
               )}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="px-4 py-2.5 bg-neutral-800 hover:bg-neutral-700 text-white rounded-xl text-xs font-semibold border border-neutral-700 transition flex items-center justify-center gap-1.5 self-start"
+              className="px-4 py-2.5 bg-subtle hover:bg-border-theme text-text-main rounded-xl text-xs font-semibold border border-border-theme transition flex items-center justify-center gap-1.5 self-start shadow-sm"
             >
               <span>📍</span> Οδηγίες στο Google Maps
             </a>
           </div>
 
           {venue.description && (
-            <p className="text-sm text-neutral-300 leading-relaxed pt-2 border-t border-neutral-800/80">
+            <p className="text-sm text-text-muted leading-relaxed pt-2 border-t border-border-theme">
               {venue.description}
             </p>
           )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-neutral-800/80 text-xs text-neutral-400">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-border-theme text-xs text-text-muted">
             <div>
-              <span className="text-neutral-500 block">Διεύθυνση:</span>
-              <strong className="text-neutral-200">{venue.address}</strong>
+              <span className="text-text-muted block">Διεύθυνση:</span>
+              <strong className="text-text-main">{venue.address}</strong>
             </div>
             <div>
-              <span className="text-neutral-500 block">Τηλέφωνο Επικοινωνίας:</span>
-              <strong className="text-neutral-200">{venue.phone}</strong>
+              <span className="text-text-muted block">Τηλέφωνο Επικοινωνίας:</span>
+              <strong className="text-text-main">{venue.phone}</strong>
             </div>
             <div>
-              <span className="text-neutral-500 block">Ωράριο Λειτουργίας:</span>
-              <strong className="text-neutral-200">{venue.hours}</strong>
+              <span className="text-text-muted block">Ωράριο Λειτουργίας:</span>
+              <strong className="text-text-main">{venue.hours}</strong>
             </div>
           </div>
         </div>
 
-        {/* Επιτυχής Κράτηση Banner */}
         {bookingSuccessCode && (
-          <div className="p-6 bg-neutral-900 border-2 border-amber-400 rounded-3xl flex justify-between items-center shadow-xl">
+          <div className="p-6 bg-card border-2 border-brand rounded-3xl flex justify-between items-center shadow-md">
             <div>
-              <span className="text-xs font-bold bg-amber-400/20 text-amber-300 px-3 py-1 rounded-full uppercase">
+              <span className="text-xs font-bold bg-brand-light text-brand-text border border-brand-border px-3 py-1 rounded-full uppercase">
                 ✓ Η κράτηση ολοκληρώθηκε!
               </span>
-              <p className="text-sm text-neutral-300 mt-2">
-                Ο κωδικός σου είναι: <strong className="text-white font-mono">{bookingSuccessCode}</strong>
+              <p className="text-sm text-text-muted mt-2">
+                Ο κωδικός σου είναι:{" "}
+                <strong className="text-text-main font-mono text-base">
+                  {bookingSuccessCode}
+                </strong>
               </p>
             </div>
             <Link
               href="/my-tickets"
-              className="px-4 py-2 bg-amber-400 text-neutral-950 font-bold text-xs rounded-xl hover:bg-amber-300 transition"
+              className="px-4 py-2 bg-brand text-white font-bold text-xs rounded-xl hover:bg-brand-hover transition shadow-sm"
             >
               Δες το e-Ticket →
             </Link>
           </div>
         )}
 
-        {/* Διαθέσιμα Slots */}
         <section className="space-y-4">
           <div className="flex justify-between items-center">
-            <h2 className="text-xl font-bold text-white">Διαθέσιμα Happy Hour Slots</h2>
-            <span className="text-xs text-neutral-400">{slots.length} διαθέσιμα</span>
+            <h2 className="text-xl font-bold text-text-main">Διαθέσιμα Happy Hour Slots</h2>
+            <span className="text-xs text-text-muted">{slots.length} διαθέσιμα</span>
           </div>
 
           {slots.length === 0 ? (
-            <div className="p-8 bg-neutral-900 border border-neutral-800 rounded-3xl text-center text-xs text-neutral-500">
+            <div className="p-8 bg-card border border-border-theme rounded-3xl text-center text-xs text-text-muted">
               Δεν υπάρχουν ενεργές προσφορές για αυτό το κατάστημα αυτή τη στιγμή.
             </div>
           ) : (
@@ -291,14 +312,14 @@ export default function VenueProfilePage({
               {slots.map((s) => (
                 <div
                   key={s.id}
-                  className="bg-neutral-900 border border-neutral-800 p-5 rounded-2xl flex flex-col justify-between space-y-3"
+                  className="bg-card border border-border-theme p-5 rounded-2xl flex flex-col justify-between space-y-3 shadow-sm hover:border-brand transition"
                 >
                   <div className="flex justify-between items-start">
                     <div>
-                      <div className="text-base font-bold text-white">{s.timeWindow}</div>
-                      <div className="text-sm text-amber-400 font-semibold">{s.discount}</div>
+                      <div className="text-base font-bold text-text-main">{s.timeWindow}</div>
+                      <div className="text-sm text-brand-text font-bold">{s.discount}</div>
                     </div>
-                    <span className="text-xs bg-neutral-800 text-neutral-300 px-2.5 py-1 rounded-lg">
+                    <span className="text-xs bg-subtle text-text-main font-medium px-2.5 py-1 rounded-lg border border-border-theme">
                       {s.availableTables} τραπέζια
                     </span>
                   </div>
@@ -306,7 +327,7 @@ export default function VenueProfilePage({
                   <button
                     disabled={s.availableTables <= 0}
                     onClick={() => setSelectedSlot(s)}
-                    className="w-full py-2 bg-amber-400 hover:bg-amber-300 text-neutral-950 font-bold rounded-xl text-xs transition disabled:opacity-50"
+                    className="w-full py-2 bg-brand hover:bg-brand-hover text-white font-bold rounded-xl text-xs transition disabled:opacity-40 shadow-sm cursor-pointer"
                   >
                     {s.availableTables > 0 ? "Κράτηση Θέσης" : "Εξαντλήθηκε"}
                   </button>
@@ -316,15 +337,14 @@ export default function VenueProfilePage({
           )}
         </section>
 
-        {/* Highlights / Πιάτα */}
         {venue.highlights && venue.highlights.length > 0 && (
-          <section className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl space-y-3">
-            <h3 className="text-base font-bold text-white">Δημοφιλή Πιάτα & Επιλογές</h3>
+          <section className="bg-card border border-border-theme p-6 rounded-3xl space-y-3 shadow-sm">
+            <h3 className="text-base font-bold text-text-main">Δημοφιλή Πιάτα & Επιλογές</h3>
             <div className="flex flex-wrap gap-2 pt-1">
               {venue.highlights.map((item) => (
                 <span
                   key={item}
-                  className="px-3 py-1.5 bg-neutral-950 border border-neutral-800 text-xs font-medium text-neutral-300 rounded-xl"
+                  className="px-3 py-1.5 bg-subtle border border-border-theme text-xs font-medium text-text-main rounded-xl"
                 >
                   🍴 {item}
                 </span>
@@ -334,22 +354,21 @@ export default function VenueProfilePage({
         )}
       </main>
 
-      {/* Modal Κράτησης */}
       {selectedSlot && (
-        <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
-          <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl max-w-sm w-full space-y-4 shadow-2xl">
-            <h3 className="font-bold text-lg text-white">Επιβεβαίωση Κράτησης</h3>
-            <p className="text-sm text-neutral-300">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-card border border-border-theme p-6 rounded-3xl max-w-sm w-full space-y-4 shadow-2xl">
+            <h3 className="font-bold text-lg text-text-main">Επιβεβαίωση Κράτησης</h3>
+            <p className="text-sm text-text-muted">
               {venue.name} ({selectedSlot.timeWindow})
             </p>
-            <div className="text-xs text-amber-400 font-semibold">{selectedSlot.discount}</div>
+            <div className="text-xs text-brand-text font-bold">{selectedSlot.discount}</div>
 
             <div>
-              <label className="block text-xs text-neutral-400 mb-1">Αριθμός Ατόμων:</label>
+              <label className="block text-xs text-text-muted mb-1">Αριθμός Ατόμων:</label>
               <select
                 value={partySize}
                 onChange={(e) => setPartySize(Number(e.target.value))}
-                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl p-2.5 text-sm text-white focus:outline-none"
+                className="w-full bg-subtle border border-border-theme rounded-xl p-2.5 text-sm text-text-main focus:outline-none focus:border-brand cursor-pointer"
               >
                 {[1, 2, 3, 4, 5, 6, 8].map((num) => (
                   <option key={num} value={num}>
@@ -363,7 +382,7 @@ export default function VenueProfilePage({
               <button
                 type="button"
                 onClick={() => setSelectedSlot(null)}
-                className="flex-1 py-2.5 bg-neutral-800 rounded-xl text-sm font-semibold hover:bg-neutral-700 transition"
+                className="flex-1 py-2.5 bg-subtle rounded-xl text-sm font-semibold hover:bg-border-theme text-text-main transition cursor-pointer"
               >
                 Άκυρο
               </button>
@@ -371,7 +390,7 @@ export default function VenueProfilePage({
                 type="button"
                 disabled={isSubmitting}
                 onClick={handleBooking}
-                className="flex-1 py-2.5 bg-amber-400 text-neutral-950 rounded-xl text-sm font-bold hover:bg-amber-300 transition disabled:opacity-50"
+                className="flex-1 py-2.5 bg-brand text-white rounded-xl text-sm font-bold hover:bg-brand-hover transition disabled:opacity-50 shadow-sm cursor-pointer"
               >
                 {isSubmitting ? "Έκδοση..." : "Έκδοση Ticket"}
               </button>

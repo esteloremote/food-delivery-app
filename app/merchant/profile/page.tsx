@@ -9,6 +9,7 @@ import {
   doc,
   onSnapshot,
   getDoc,
+  getDocs,
   setDoc,
   query,
   where,
@@ -22,32 +23,14 @@ interface VenueItem {
   slug: string;
 }
 
-function generateSlug(text: string): string {
-  const greekToLatinMap: Record<string, string> = {
-    α: "a", ά: "a", β: "v", γ: "g", δ: "d", ε: "e", έ: "e", ζ: "z", η: "i", ή: "i",
-    θ: "th", ι: "i", ί: "i", ϊ: "i", ΐ: "i", κ: "k", λ: "l", μ: "m", ν: "n", ξ: "x",
-    ο: "o", ό: "o", π: "p", ρ: "r", σ: "s", ς: "s", τ: "t", υ: "y", ύ: "y", ϋ: "y",
-    ΰ: "y", φ: "f", χ: "ch", ψ: "ps", ω: "o", ώ: "o",
-  };
-
-  return text
-    .toLowerCase()
-    .split("")
-    .map((char) => greekToLatinMap[char] || char)
-    .join("")
-    .replace(/[^a-z0-9\s-]/g, "")
-    .trim()
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-");
-}
-
 export default function MerchantProfilePage() {
   const router = useRouter();
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [isAuthorizedMerchant, setIsAuthorizedMerchant] = useState(false);
 
   const [existingVenues, setExistingVenues] = useState<VenueItem[]>([]);
-  const [selectedVenueId, setSelectedVenueId] = useState<string>("NEW");
+  const [selectedVenueId, setSelectedVenueId] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [geocoding, setGeocoding] = useState(false);
@@ -68,26 +51,8 @@ export default function MerchantProfilePage() {
     highlights: "",
   });
 
-  // 1. Δήλωση της loadVenueDetails ΠΡΙΝ από τη χρήση της για αποφυγή σφαλμάτων linter
   const loadVenueDetails = useCallback(async (venueId: string) => {
-    if (venueId === "NEW") {
-      setFormData({
-        name: "",
-        slug: "",
-        category: "",
-        area: "",
-        address: "",
-        phone: "",
-        hours: "13:00 - 00:30 καθημερινά",
-        description: "",
-        image: "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=80",
-        lat: 37.9753,
-        lng: 23.7361,
-        highlights: "",
-      });
-      return;
-    }
-
+    if (!venueId) return;
     setLoading(true);
     try {
       const docRef = doc(db, "venues", venueId);
@@ -103,7 +68,9 @@ export default function MerchantProfilePage() {
           phone: data.phone || "",
           hours: data.hours || "13:00 - 00:30 καθημερινά",
           description: data.description || "",
-          image: data.image || "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=80",
+          image:
+            data.image ||
+            "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=80",
           lat: data.lat ?? 37.9753,
           lng: data.lng ?? 23.7361,
           highlights: (data.highlights || []).join(", "),
@@ -116,26 +83,47 @@ export default function MerchantProfilePage() {
     }
   }, []);
 
-  // 2. Έλεγχος Σύνδεσης Εστιάτορα
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (user) => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) {
+        setIsAuthorizedMerchant(false);
+        setAuthLoading(false);
         router.push("/merchant/login");
-      } else {
+        return;
+      }
+
+      try {
+        const mSnap = await getDoc(doc(db, "merchants", user.uid));
+        const qEmail = query(
+          collection(db, "merchants"),
+          where("email", "==", user.email?.toLowerCase() || "")
+        );
+        const emailSnap = await getDocs(qEmail);
+
+        if (!mSnap.exists() && emailSnap.empty) {
+          setIsAuthorizedMerchant(false);
+          setAuthLoading(false);
+          return;
+        }
+
         setCurrentUser(user);
+        setIsAuthorizedMerchant(true);
+      } catch (err) {
+        console.error(err);
+        setIsAuthorizedMerchant(false);
+      } finally {
         setAuthLoading(false);
       }
     });
     return () => unsub();
   }, [router]);
 
-  // 3. Real-time Subscription μόνο στα καταστήματα του συνδεδεμένου χρήστη
   useEffect(() => {
     if (!currentUser) return;
 
     const q = query(
       collection(db, "venues"),
-      where("ownerId", "==", currentUser.uid)
+      where("ownerEmail", "==", currentUser.email?.toLowerCase() || "")
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -151,7 +139,10 @@ export default function MerchantProfilePage() {
       setExistingVenues(list);
 
       if (list.length > 0) {
-        const savedId = typeof window !== "undefined" ? localStorage.getItem("happyseats_merchant_venueId") : null;
+        const savedId =
+          typeof window !== "undefined"
+            ? localStorage.getItem("happyseats_merchant_venueId")
+            : null;
         const targetId = list.find((v) => v.id === savedId)?.id || list[0].id;
         setSelectedVenueId(targetId);
         loadVenueDetails(targetId);
@@ -167,16 +158,6 @@ export default function MerchantProfilePage() {
     loadVenueDetails(venueId);
   };
 
-  const handleNameChange = (newName: string) => {
-    const autoSlug = generateSlug(newName);
-    setFormData((prev) => ({
-      ...prev,
-      name: newName,
-      slug: selectedVenueId === "NEW" ? autoSlug : prev.slug,
-    }));
-  };
-
-  // Αυτόματος εντοπισμός συντεταγμένων μέσω OpenStreetMap Nominatim
   const handleGeocodeAddress = async () => {
     if (!formData.address.trim()) {
       alert("Παρακαλώ συμπληρώστε πρώτα τη διεύθυνση του καταστήματος.");
@@ -199,9 +180,11 @@ export default function MerchantProfilePage() {
           lat: Number(newLat.toFixed(5)),
           lng: Number(newLng.toFixed(5)),
         }));
-        alert(`Βρέθηκε η τοποθεσία!\nΠλάτος (Lat): ${newLat.toFixed(5)}, Μήκος (Lng): ${newLng.toFixed(5)}`);
+        alert(
+          `Βρέθηκε η τοποθεσία!\nΠλάτος (Lat): ${newLat.toFixed(5)}, Μήκος (Lng): ${newLng.toFixed(5)}`
+        );
       } else {
-        alert("Δεν βρέθηκαν ακριβείς συντεταγμένες για τη διεύθυνση αυτή. Ελέγξτε την ορθότητα της οδού ή συμπληρώστε χειροκίνητα τις συντεταγμένες.");
+        alert("Δεν βρέθηκαν ακριβείς συντεταγμένες για τη διεύθυνση αυτή.");
       }
     } catch (err) {
       console.error(err);
@@ -213,15 +196,10 @@ export default function MerchantProfilePage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentUser) return;
+    if (!currentUser || !selectedVenueId) return;
 
     setSaving(true);
     setMessage(null);
-
-    let finalDocId = selectedVenueId;
-    if (selectedVenueId === "NEW") {
-      finalDocId = formData.slug.trim() || generateSlug(formData.name) || doc(collection(db, "venues")).id;
-    }
 
     const highlightsArray = formData.highlights
       .split(",")
@@ -233,12 +211,9 @@ export default function MerchantProfilePage() {
 
     try {
       await setDoc(
-        doc(db, "venues", finalDocId),
+        doc(db, "venues", selectedVenueId),
         {
-          ownerId: currentUser.uid,
-          ownerEmail: currentUser.email,
           name: formData.name.trim(),
-          slug: formData.slug.trim() || finalDocId,
           category: formData.category.trim(),
           area: formData.area.trim(),
           address: formData.address.trim(),
@@ -254,14 +229,13 @@ export default function MerchantProfilePage() {
         { merge: true }
       );
 
-      localStorage.setItem("happyseats_merchant_venueId", finalDocId);
-      localStorage.setItem("happyseats_merchant_venueName", formData.name.trim());
-
-      setMessage({ type: "success", text: "✓ Το προφίλ και η διεύθυνση αποθηκεύτηκαν επιτυχώς!" });
-      setSelectedVenueId(finalDocId);
+      setMessage({
+        type: "success",
+        text: "✓ Τα στοιχεία του καταστήματος αποθηκεύτηκαν επιτυχώς!",
+      });
     } catch (err) {
       console.error(err);
-      setMessage({ type: "error", text: "Παρουσιάστηκε σφάλμα κατά την αποθήκευση. Ελέγξτε τα δικαιώματα." });
+      setMessage({ type: "error", text: "Παρουσιάστηκε σφάλμα κατά την αποθήκευση." });
     } finally {
       setSaving(false);
     }
@@ -269,110 +243,123 @@ export default function MerchantProfilePage() {
 
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center text-sm">
+      <div className="min-h-screen bg-surface text-text-muted flex items-center justify-center text-sm">
         Έλεγχος διαπιστευτηρίων...
       </div>
     );
   }
 
+  if (!isAuthorizedMerchant) {
+    return (
+      <div className="min-h-screen bg-surface text-text-main flex flex-col items-center justify-center p-6 space-y-4">
+        <div className="w-16 h-16 bg-red-100 text-red-600 rounded-3xl flex items-center justify-center text-2xl font-bold">
+          🚫
+        </div>
+        <h1 className="text-xl font-black">Μη Εξουσιοδοτημένη Πρόσβαση</h1>
+        <Link
+          href="/merchant/login"
+          className="px-4 py-2 bg-brand text-white rounded-xl text-xs font-bold shadow-sm"
+        >
+          Σύνδεση Συνεργάτη →
+        </Link>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-6 flex flex-col items-center">
-      <header className="w-full max-w-2xl flex justify-between items-center pb-6 border-b border-slate-800 mb-8">
+    <div className="min-h-screen bg-surface text-text-main p-6 flex flex-col items-center">
+      <header className="w-full max-w-2xl flex justify-between items-center pb-6 border-b border-border-theme mb-8">
         <div>
-          <span className="text-xs font-bold uppercase tracking-widest text-amber-400">
+          <span className="text-xs font-bold uppercase tracking-widest text-brand-text">
             Merchant Studio
           </span>
-          <h1 className="text-2xl font-black text-white">Διαχείριση Προφίλ & Μενού</h1>
-          <p className="text-xs text-slate-400 mt-1">
-            Συνδεδεμένος ως: <strong className="text-slate-200">{currentUser?.email}</strong>
+          <h1 className="text-2xl font-black text-text-main">Στοιχεία Καταστήματος & Μενού</h1>
+          <p className="text-xs text-text-muted mt-1">
+            Συνδεδεμένος ως: <strong className="text-text-main">{currentUser?.email}</strong>
           </p>
         </div>
         <Link
           href="/merchant"
-          className="text-xs bg-slate-800 hover:bg-slate-700 px-3.5 py-2 rounded-xl transition text-slate-300"
+          className="text-xs bg-card hover:bg-subtle px-3.5 py-2 rounded-xl transition text-text-main border border-border-theme shadow-sm"
         >
           ← Merchant Portal
         </Link>
       </header>
 
-      <main className="w-full max-w-2xl bg-slate-900 border border-slate-800 p-6 md:p-8 rounded-3xl shadow-xl space-y-6">
-        {/* Επιλογέας Καταστήματος */}
-        <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 space-y-2">
-          <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider">
-            Επιλογή Καταστήματος προς Επεξεργασία
-          </label>
+      <main className="w-full max-w-2xl bg-card border border-border-theme p-6 md:p-8 rounded-3xl shadow-sm space-y-6">
+        <div className="bg-subtle p-4 rounded-2xl border border-border-theme space-y-2">
+          <div className="flex justify-between items-center">
+            <label className="block text-xs font-semibold text-text-muted uppercase tracking-wider">
+              Επιλεγμένο Κατάστημα
+            </label>
+            <span className="text-[11px] text-text-muted">
+              Για προσθήκη νέου υποκαταστήματος επικοινωνήστε με το Admin
+            </span>
+          </div>
           <select
             value={selectedVenueId}
             onChange={(e) => handleSelectVenue(e.target.value)}
-            className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-amber-400 font-bold focus:outline-none focus:border-amber-400 cursor-pointer"
+            className="w-full bg-card border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-brand-text font-bold focus:outline-none focus:border-brand cursor-pointer shadow-sm"
           >
             {existingVenues.map((v) => (
               <option key={v.id} value={v.id}>
-                📍 {v.name} ({v.slug})
+                📍 {v.name} (/{v.slug})
               </option>
             ))}
-            <option value="NEW">+ Δημιουργία Νέου Καταστήματος</option>
           </select>
         </div>
 
         {loading ? (
-          <div className="text-center py-12 text-slate-500 text-sm">Φόρτωση στοιχείων...</div>
+          <div className="text-center py-12 text-text-muted text-sm">Φόρτωση στοιχείων...</div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs text-slate-400 mb-1">Όνομα Καταστήματος *</label>
+                <label className="block text-xs text-text-muted mb-1">Όνομα Καταστήματος *</label>
                 <input
                   required
                   type="text"
                   value={formData.name}
-                  onChange={(e) => handleNameChange(e.target.value)}
-                  placeholder="π.χ. Ταβέρνα ο Πέτρος"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400"
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand"
                 />
               </div>
 
               <div>
-                <label className="block text-xs text-slate-400 mb-1">URL ID (Slug)</label>
+                <label className="block text-xs text-text-muted mb-1">URL ID (Slug - Κλειδωμένο)</label>
                 <input
+                  disabled
                   type="text"
                   value={formData.slug}
-                  onChange={(e) => setFormData({ ...formData, slug: e.target.value })}
-                  placeholder="taverna-o-petros"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-300 font-mono focus:outline-none focus:border-amber-400"
+                  className="w-full bg-subtle/60 border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-muted font-mono cursor-not-allowed"
                 />
-                <span className="text-[10px] text-slate-500 mt-1 block">
-                  URL: /venue/{formData.slug || "..."}
-                </span>
               </div>
 
               <div>
-                <label className="block text-xs text-slate-400 mb-1">Κατηγορία / Κουζίνα *</label>
+                <label className="block text-xs text-text-muted mb-1">Κατηγορία / Κουζίνα *</label>
                 <input
                   required
                   type="text"
                   value={formData.category}
                   onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                  placeholder="π.χ. Ελληνική Ταβέρνα, Ψησταριά"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400"
+                  className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand"
                 />
               </div>
 
               <div>
-                <label className="block text-xs text-slate-400 mb-1">Περιοχή *</label>
+                <label className="block text-xs text-text-muted mb-1">Περιοχή *</label>
                 <input
                   required
                   type="text"
                   value={formData.area}
                   onChange={(e) => setFormData({ ...formData, area: e.target.value })}
-                  placeholder="π.χ. Πλάκα, Κολωνάκι, Γλυφάδα"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400"
+                  className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs text-slate-400 mb-1">
+              <label className="block text-xs text-text-muted mb-1">
                 Ακριβής Διεύθυνση (Οδός, Αριθμός, ΤΚ) *
               </label>
               <input
@@ -380,84 +367,77 @@ export default function MerchantProfilePage() {
                 type="text"
                 value={formData.address}
                 onChange={(e) => setFormData({ ...formData, address: e.target.value })}
-                placeholder="π.χ. Αδριανού 12, Αθήνα"
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400"
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand"
               />
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs text-slate-400 mb-1">Τηλέφωνο Επικοινωνίας *</label>
+                <label className="block text-xs text-text-muted mb-1">Τηλέφωνο Επικοινωνίας *</label>
                 <input
                   required
                   type="text"
                   value={formData.phone}
                   onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                  placeholder="+30 210 1234567"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400"
+                  className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand"
                 />
               </div>
 
               <div>
-                <label className="block text-xs text-slate-400 mb-1">Ωράριο Λειτουργίας *</label>
+                <label className="block text-xs text-text-muted mb-1">Ωράριο Λειτουργίας *</label>
                 <input
                   required
                   type="text"
                   value={formData.hours}
                   onChange={(e) => setFormData({ ...formData, hours: e.target.value })}
-                  placeholder="13:00 - 00:30 καθημερινά"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400"
+                  className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs text-slate-400 mb-1">URL Φωτογραφίας Καταστήματος *</label>
+              <label className="block text-xs text-text-muted mb-1">URL Φωτογραφίας Καταστήματος *</label>
               <input
                 required
                 type="url"
                 value={formData.image}
                 onChange={(e) => setFormData({ ...formData, image: e.target.value })}
-                placeholder="https://images.unsplash.com/..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400"
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand"
               />
             </div>
 
             <div>
-              <label className="block text-xs text-slate-400 mb-1">Περιγραφή Καταστήματος</label>
+              <label className="block text-xs text-text-muted mb-1">Περιγραφή Καταστήματος</label>
               <textarea
                 rows={3}
                 value={formData.description}
                 onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                placeholder="Λίγα λόγια για την ατμόσφαιρα, τη φιλοσοφία και το μενού..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400"
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand"
               />
             </div>
 
             <div>
-              <label className="block text-xs text-slate-400 mb-1">
+              <label className="block text-xs text-text-muted mb-1">
                 Highlights / Signature Πιάτα (χωρισμένα με κόμμα)
               </label>
               <input
                 type="text"
                 value={formData.highlights}
                 onChange={(e) => setFormData({ ...formData, highlights: e.target.value })}
-                placeholder="Αρνί στο φούρνο, Χωριάτικη σαλάτα, Τζατζίκι"
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-400"
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand"
               />
             </div>
 
-            {/* Συντεταγμένες και Αυτόματος Εντοπισμός */}
-            <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 space-y-3">
+            <div className="bg-subtle p-4 rounded-2xl border border-border-theme space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <span className="text-xs font-semibold text-amber-400 block">
+                <span className="text-xs font-semibold text-brand-text block">
                   📍 Συντεταγμένες για τον Χάρτη Πελάτη
                 </span>
                 <button
                   type="button"
                   onClick={handleGeocodeAddress}
                   disabled={geocoding}
-                  className="text-[11px] bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold px-3 py-1.5 rounded-lg border border-slate-700 transition disabled:opacity-50 self-start sm:self-auto"
+                  className="text-[11px] bg-card hover:bg-subtle text-brand-text font-bold px-3 py-1.5 rounded-lg border border-border-theme transition disabled:opacity-50 self-start sm:self-auto cursor-pointer shadow-sm"
                 >
                   {geocoding ? "Αναζήτηση..." : "🔍 Αυτόματος Εντοπισμός από Διεύθυνση"}
                 </button>
@@ -465,24 +445,28 @@ export default function MerchantProfilePage() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">Πλάτος (Lat) - π.χ. 37.9753</label>
+                  <label className="block text-[11px] text-text-muted mb-1">Πλάτος (Lat)</label>
                   <input
                     type="number"
                     step="any"
                     value={formData.lat}
-                    onChange={(e) => setFormData({ ...formData, lat: parseFloat(e.target.value) || 0 })}
-                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-400"
+                    onChange={(e) =>
+                      setFormData({ ...formData, lat: parseFloat(e.target.value) || 0 })
+                    }
+                    className="w-full bg-card border border-border-theme rounded-xl px-3 py-2 text-xs text-text-main focus:outline-none focus:border-brand"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">Μήκος (Lng) - π.χ. 23.7361</label>
+                  <label className="block text-[11px] text-text-muted mb-1">Μήκος (Lng)</label>
                   <input
                     type="number"
                     step="any"
                     value={formData.lng}
-                    onChange={(e) => setFormData({ ...formData, lng: parseFloat(e.target.value) || 0 })}
-                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-400"
+                    onChange={(e) =>
+                      setFormData({ ...formData, lng: parseFloat(e.target.value) || 0 })
+                    }
+                    className="w-full bg-card border border-border-theme rounded-xl px-3 py-2 text-xs text-text-main focus:outline-none focus:border-brand"
                   />
                 </div>
               </div>
@@ -492,8 +476,8 @@ export default function MerchantProfilePage() {
               <div
                 className={`p-3 rounded-xl text-xs font-semibold text-center ${
                   message.type === "success"
-                    ? "bg-emerald-500/10 border border-emerald-500/30 text-emerald-300"
-                    : "bg-red-500/10 border border-red-500/30 text-red-300"
+                    ? "bg-emerald-50 border border-emerald-200 text-emerald-800"
+                    : "bg-red-50 border border-red-200 text-red-600"
                 }`}
               >
                 {message.text}
@@ -503,7 +487,7 @@ export default function MerchantProfilePage() {
             <button
               type="submit"
               disabled={saving}
-              className="w-full py-3.5 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-xl text-sm transition disabled:opacity-50 shadow-lg"
+              className="w-full py-3.5 bg-brand hover:bg-brand-hover text-white font-bold rounded-xl text-sm transition disabled:opacity-50 shadow-sm cursor-pointer"
             >
               {saving ? "Αποθήκευση..." : "Αποθήκευση Προφίλ & Μενού"}
             </button>
