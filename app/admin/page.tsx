@@ -78,7 +78,9 @@ export default function AdminDashboardPage() {
   const [merchants, setMerchants] = useState<MerchantAccount[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Φόρμα Εγγραφής Νέου Συνεργάτη & Καταστήματος από τον Admin
+  // Κεντρικές ρυθμίσεις συστήματος
+  const [systemSettings, setSystemSettings] = useState({ isRaining: false, globalMissYou: false });
+
   const [newCompanyName, setNewCompanyName] = useState("");
   const [newMerchantEmail, setNewMerchantEmail] = useState("");
   const [newMerchantPassword, setNewMerchantPassword] = useState("");
@@ -127,13 +129,33 @@ export default function AdminDashboardPage() {
       setLoading(false);
     });
 
+    // Listener για τον Καιρό και το Σύστημα
+    const unsubSettings = onSnapshot(doc(db, "settings", "system"), (docSnap) => {
+      if (docSnap.exists()) {
+        setSystemSettings({
+          isRaining: docSnap.data().isRaining || false,
+          globalMissYou: docSnap.data().globalMissYou || false,
+        });
+      }
+    });
+
     return () => {
       unsubVenues();
       unsubMerchants();
+      unsubSettings();
     };
   }, []);
 
-  // Εναλλαγή κατάστασης συνδρομής ΑΝΑ ΚΑΤΑΣΤΗΜΑ & Συγχρονισμός με Πελάτες (isPublished)
+  const toggleSystemSetting = async (key: string, currentValue: boolean) => {
+    try {
+      await setDoc(doc(db, "settings", "system"), { [key]: !currentValue }, { merge: true });
+      setActionMessage(`Η ρύθμιση ενημερώθηκε σε ${!currentValue ? "ON" : "OFF"}`);
+    } catch (err) {
+      console.error(err);
+      alert("Σφάλμα ενημέρωσης συστήματος.");
+    }
+  };
+
   const toggleVenueSubscription = async (venue: AdminVenue) => {
     const merchant = merchants.find(
       (m) => m.id === venue.ownerId || m.email?.toLowerCase() === venue.ownerEmail?.toLowerCase()
@@ -147,14 +169,12 @@ export default function AdminDashboardPage() {
     const validUntilStr = nextDate.toLocaleDateString("el-GR");
 
     try {
-      // 1. Ενημέρωση του ίδιου του καταστήματος (ώστε να κρύβεται/εμφανίζεται στους πελάτες)
       await updateDoc(doc(db, "venues", venue.id), {
         subscriptionStatus: nextStatus,
         isPublished: nextPublished,
         validUntil: validUntilStr,
       });
 
-      // 2. Ενημέρωση και του λογαριασμού Merchant
       if (merchant) {
         await updateDoc(doc(db, "merchants", merchant.id), {
           "subscription.status": nextStatus,
@@ -164,7 +184,7 @@ export default function AdminDashboardPage() {
 
       setActionMessage(
         `Το κατάστημα "${venue.name}" είναι πλέον: ${
-          nextStatus === "active" ? "✓ Ενεργό & Δημοσιευμένο" : "⚠️ Σε Αναστολή (Κρυφό από Πελάτες)"
+          nextStatus === "active" ? "✓ Ενεργό & Δημοσιευμένο" : "⚠️ Σε Αναστολή (Κρυφό)"
         }`
       );
     } catch (err) {
@@ -173,7 +193,6 @@ export default function AdminDashboardPage() {
     }
   };
 
-  // Δημιουργία Πραγματικού Λογαριασμού Συνεργάτη (Firebase Auth) & Καταστήματος
   const handleCreatePartnerAndVenue = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
@@ -188,15 +207,11 @@ export default function AdminDashboardPage() {
     let partnerUid = "";
 
     try {
-      // Έλεγχος αν υπάρχει ήδη ο συνεργάτης στη λίστα merchants
-      const existingMerchant = merchants.find(
-        (m) => m.email?.toLowerCase() === cleanEmail
-      );
+      const existingMerchant = merchants.find((m) => m.email?.toLowerCase() === cleanEmail);
 
       if (existingMerchant) {
         partnerUid = existingMerchant.id;
       } else {
-        // Δημιουργούμε τον χρήστη στο Firebase Auth μέσω Secondary App ώστε να ΜΗΝ αποσυνδεθεί ο Admin!
         const config = auth.app.options;
         const secondaryAppName = `SecondaryAuthApp-${Date.now()}`;
         const existingApps = getApps();
@@ -215,7 +230,6 @@ export default function AdminDashboardPage() {
         await signOut(secondaryAuth);
         await deleteApp(secondaryApp);
 
-        // Αποθήκευση στον πίνακα merchants με το ΠΡΑΓΜΑΤΙΚΟ Firebase Auth UID
         await setDoc(doc(db, "merchants", partnerUid), {
           companyName: newCompanyName.trim(),
           email: cleanEmail,
@@ -230,7 +244,6 @@ export default function AdminDashboardPage() {
         });
       }
 
-      // Δημιουργία του Καταστήματος συνδεδεμένου με το πραγματικό UID & Email
       await setDoc(doc(db, "venues", venueSlug), {
         ownerId: partnerUid,
         ownerEmail: cleanEmail,
@@ -242,8 +255,7 @@ export default function AdminDashboardPage() {
         phone: "+30 210 0000000",
         hours: "13:00 - 00:30 καθημερινά",
         description: `Επίσημη καταχώριση για το ${newVenueName.trim()}.`,
-        image:
-          "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=80",
+        image: "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=80",
         lat: 37.9838,
         lng: 23.7275,
         tableStatus: "plenty",
@@ -257,9 +269,7 @@ export default function AdminDashboardPage() {
         createdAt: serverTimestamp(),
       });
 
-      setActionMessage(
-        `✓ Ο συνεργάτης (${cleanEmail}) και το κατάστημα "${newVenueName}" δημιουργήθηκαν! Μπορεί να συνδεθεί άμεσα στο /merchant/login.`
-      );
+      setActionMessage(`✓ Ο συνεργάτης (${cleanEmail}) και το κατάστημα δημιουργήθηκαν!`);
       setNewCompanyName("");
       setNewMerchantEmail("");
       setNewMerchantPassword("");
@@ -267,36 +277,14 @@ export default function AdminDashboardPage() {
       setNewVenueArea("");
     } catch (err: unknown) {
       console.error(err);
-      const code = (err as { code?: string })?.code;
-      if (code === "auth/email-already-in-use") {
-        alert(
-          "Το email χρησιμοποιείται ήδη στο Firebase Auth. Αν ανήκει σε υπάρχοντα συνεργάτη, βεβαιωθείτε ότι υπάρχει στη συλλογή merchants."
-        );
-      } else {
-        alert("Σφάλμα κατά την καταχώρηση συνεργάτη.");
-      }
+      alert("Σφάλμα κατά την καταχώρηση συνεργάτη.");
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleDeleteVenue = async (venueId: string, name: string) => {
-    if (!confirm(`Θέλετε να διαγράψετε οριστικά το κατάστημα "${name}";`)) return;
-    try {
-      await deleteDoc(doc(db, "venues", venueId));
-      setActionMessage(`Το κατάστημα "${name}" διαγράφηκε.`);
-    } catch (err) {
-      console.error(err);
-      alert("Σφάλμα κατά τη διαγραφή.");
-    }
-  };
-
   if (authLoading || loading) {
-    return (
-      <div className="min-h-screen bg-surface text-text-muted flex items-center justify-center text-sm">
-        Έλεγχος διαπιστευτηρίων διαχειριστή...
-      </div>
-    );
+    return <div className="min-h-screen bg-surface flex items-center justify-center text-sm">Έλεγχος διαπιστευτηρίων...</div>;
   }
 
   const isAuthorizedAdmin = Boolean(
@@ -308,22 +296,9 @@ export default function AdminDashboardPage() {
 
   if (!isAuthorizedAdmin) {
     return (
-      <div className="min-h-screen bg-surface text-text-main flex flex-col items-center justify-center p-6 space-y-4">
-        <div className="w-16 h-16 bg-red-100 text-red-600 rounded-3xl flex items-center justify-center text-2xl font-bold shadow-sm">
-          🚫
-        </div>
+      <div className="min-h-screen bg-surface flex flex-col items-center justify-center p-6 space-y-4">
         <h1 className="text-xl font-black text-text-main">Περιορισμένη Πρόσβαση (403)</h1>
-        <p className="text-xs text-text-muted text-center max-w-sm">
-          Ο λογαριασμός{" "}
-          <strong className="text-text-main">{currentUser?.email || "Επισκέπτης"}</strong> δεν
-          διαθέτει δικαιώματα διαχειριστή στην πλατφόρμα HappySeats.
-        </p>
-        <Link
-          href="/"
-          className="px-4 py-2 bg-brand hover:bg-brand-hover text-white rounded-xl text-xs font-bold transition shadow-sm"
-        >
-          ← Επιστροφή στην Αρχική Σελίδα
-        </Link>
+        <Link href="/" className="px-4 py-2 bg-brand text-white rounded-xl text-xs font-bold">← Επιστροφή στην Αρχική</Link>
       </div>
     );
   }
@@ -332,244 +307,102 @@ export default function AdminDashboardPage() {
     <div className="min-h-screen bg-surface text-text-main p-6">
       <header className="max-w-6xl mx-auto flex flex-col md:flex-row md:items-center justify-between pb-6 border-b border-border-theme gap-4">
         <div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs uppercase tracking-widest bg-brand text-white font-black px-2 py-0.5 rounded-md">
-              Platform Admin
-            </span>
-            <span className="text-[10px] bg-subtle text-text-muted font-medium px-2 py-0.5 rounded-full border border-border-theme">
-              {currentUser?.email}
-            </span>
-          </div>
-          <h1 className="text-2xl font-black text-text-main mt-1">
-            Κεντρική Διαχείριση Καταστημάτων & Συνδρομών
-          </h1>
+          <h1 className="text-2xl font-black text-text-main mt-1">Admin Panel</h1>
         </div>
-
-        <div className="flex items-center gap-3">
-          <Link
-            href="/merchant"
-            className="text-xs bg-card hover:bg-subtle px-3 py-2 rounded-xl transition text-text-main border border-border-theme shadow-sm"
-          >
-            Merchant View →
-          </Link>
-          <Link
-            href="/"
-            className="text-xs bg-card hover:bg-subtle px-3 py-2 rounded-xl transition text-text-main border border-border-theme shadow-sm"
-          >
-            Customer View →
-          </Link>
-        </div>
+        <Link href="/" className="text-xs bg-card px-3 py-2 rounded-xl text-text-main border font-bold">
+          ← Επιστροφή στην Εφαρμογή
+        </Link>
       </header>
 
       <main className="max-w-6xl mx-auto py-8 space-y-8">
         {actionMessage && (
-          <div className="p-4 bg-emerald-50 border border-emerald-300 text-emerald-800 rounded-2xl text-xs font-bold flex justify-between items-center shadow-sm">
+          <div className="p-4 bg-emerald-50 text-emerald-800 rounded-2xl text-xs font-bold flex justify-between animate-pulse">
             <span>{actionMessage}</span>
-            <button onClick={() => setActionMessage(null)} className="cursor-pointer">
-              ✕
-            </button>
+            <button onClick={() => setActionMessage(null)}>✕</button>
           </div>
         )}
 
-        {/* 1. Φόρμα Εγγραφής Νέας Επιχείρησης από τον Admin */}
+        {/* --- ΝΕΟ: ΚΕΝΤΡΙΚΟΣ ΕΛΕΓΧΟΣ (ΚΑΙΡΟΣ) --- */}
         <section className="bg-card border border-border-theme p-6 rounded-3xl shadow-sm space-y-4">
-          <div>
-            <h2 className="text-base font-bold text-text-main flex items-center gap-2">
-              <span>➕</span> Δημιουργία Λογαριασμού Συνεργάτη & Καταστήματος
-            </h2>
-            <p className="text-xs text-text-muted mt-0.5">
-              Δημιουργεί έτοιμο λογαριασμό σύνδεσης για τον καταστηματάρχη και ενεργοποιεί τη μηνιαία συνδρομή του καταστήματος.
-            </p>
-          </div>
-
-          <form
-            onSubmit={handleCreatePartnerAndVenue}
-            className="bg-subtle p-5 rounded-2xl border border-border-theme space-y-4 text-xs"
-          >
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+          <h2 className="text-base font-bold">⚙️ Κεντρικός Έλεγχος Πλατφόρμας (Global Automations)</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="p-4 bg-subtle rounded-2xl border flex justify-between items-center">
               <div>
-                <label className="block text-text-muted font-semibold mb-1">
-                  Επωνυμία Επιχείρησης *
-                </label>
-                <input
-                  required
-                  type="text"
-                  placeholder="π.χ. Όμιλος Εστίασης Αθήνα"
-                  value={newCompanyName}
-                  onChange={(e) => setNewCompanyName(e.target.value)}
-                  className="w-full bg-card border border-border-theme rounded-xl px-3 py-2 text-text-main focus:outline-none focus:border-brand"
-                />
+                <h3 className="font-bold text-sm">🌧️ Προσομοίωση Βροχής</h3>
+                <p className="text-xs text-text-muted mt-1">Ενεργοποιεί μαζικά τα "Weather Deals" στους πελάτες.</p>
               </div>
-
-              <div>
-                <label className="block text-text-muted font-semibold mb-1">
-                  Email Σύνδεσης Καταστηματάρχη *
-                </label>
-                <input
-                  required
-                  type="email"
-                  placeholder="manager@restaurant.gr"
-                  value={newMerchantEmail}
-                  onChange={(e) => setNewMerchantEmail(e.target.value)}
-                  className="w-full bg-card border border-border-theme rounded-xl px-3 py-2 text-text-main focus:outline-none focus:border-brand"
-                />
-              </div>
-
-              <div>
-                <label className="block text-text-muted font-semibold mb-1">
-                  Αρχικός Κωδικός Πρόσβασης *
-                </label>
-                <input
-                  required
-                  type="text"
-                  minLength={6}
-                  placeholder="Τουλάχιστον 6 χαρακτήρες"
-                  value={newMerchantPassword}
-                  onChange={(e) => setNewMerchantPassword(e.target.value)}
-                  className="w-full bg-card border border-border-theme rounded-xl px-3 py-2 text-text-main font-mono focus:outline-none focus:border-brand"
-                />
-              </div>
-
-              <div>
-                <label className="block text-text-muted font-semibold mb-1">
-                  Όνομα Καταστήματος *
-                </label>
-                <input
-                  required
-                  type="text"
-                  placeholder="π.χ. Ταβέρνα ο Πέτρος"
-                  value={newVenueName}
-                  onChange={(e) => setNewVenueName(e.target.value)}
-                  className="w-full bg-card border border-border-theme rounded-xl px-3 py-2 text-text-main focus:outline-none focus:border-brand"
-                />
-              </div>
-
-              <div>
-                <label className="block text-text-muted font-semibold mb-1">
-                  Περιοχή Καταστήματος *
-                </label>
-                <input
-                  required
-                  type="text"
-                  placeholder="π.χ. Πλάκα, Κολωνάκι"
-                  value={newVenueArea}
-                  onChange={(e) => setNewVenueArea(e.target.value)}
-                  className="w-full bg-card border border-border-theme rounded-xl px-3 py-2 text-text-main focus:outline-none focus:border-brand"
-                />
-              </div>
-
-              <div>
-                <label className="block text-text-muted font-semibold mb-1">
-                  Κατηγορία & Μηνιαία Συνδρομή (€) *
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    required
-                    type="text"
-                    placeholder="Ελληνική"
-                    value={newVenueCategory}
-                    onChange={(e) => setNewVenueCategory(e.target.value)}
-                    className="w-2/3 bg-card border border-border-theme rounded-xl px-3 py-2 text-text-main focus:outline-none focus:border-brand"
-                  />
-                  <input
-                    required
-                    type="number"
-                    min={10}
-                    value={newMonthlyPrice}
-                    onChange={(e) => setNewMonthlyPrice(Number(e.target.value))}
-                    className="w-1/3 bg-card border border-border-theme rounded-xl px-3 py-2 text-text-main focus:outline-none focus:border-brand"
-                  />
-                </div>
-              </div>
+              <button 
+                onClick={() => toggleSystemSetting("isRaining", systemSettings.isRaining)} 
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition ${systemSettings.isRaining ? "bg-sky-600 text-white" : "bg-card border"}`}
+              >
+                {systemSettings.isRaining ? "ON (Βρέχει)" : "OFF"}
+              </button>
             </div>
 
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="px-5 py-2.5 bg-brand hover:bg-brand-hover text-white font-bold rounded-xl transition disabled:opacity-50 shadow-sm cursor-pointer"
-            >
-              {isSubmitting
-                ? "Δημιουργία Λογαριασμού & Καταστήματος..."
-                : "+ Δημιουργία Συνεργάτη & Ενεργοποίηση Συνδρομής"}
+            <div className="p-4 bg-subtle rounded-2xl border flex justify-between items-center">
+              <div>
+                <h3 className="font-bold text-sm">💌 "Miss You" Κουπόνι</h3>
+                <p className="text-xs text-text-muted mt-1">Εμφανίζει το banner επιστροφής πελατών.</p>
+              </div>
+              <button 
+                onClick={() => toggleSystemSetting("globalMissYou", systemSettings.globalMissYou)} 
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition ${systemSettings.globalMissYou ? "bg-purple-600 text-white" : "bg-card border"}`}
+              >
+                {systemSettings.globalMissYou ? "ON" : "OFF"}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section className="bg-card border border-border-theme p-6 rounded-3xl shadow-sm space-y-4">
+          <h2 className="text-base font-bold">➕ Δημιουργία Λογαριασμού Συνεργάτη & Καταστήματος</h2>
+          <form onSubmit={handleCreatePartnerAndVenue} className="bg-subtle p-5 rounded-2xl border space-y-4 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+              <input required type="text" placeholder="Επωνυμία Επιχείρησης *" value={newCompanyName} onChange={(e) => setNewCompanyName(e.target.value)} className="w-full px-3 py-2 rounded-xl border" />
+              <input required type="email" placeholder="Email Συνεργάτη *" value={newMerchantEmail} onChange={(e) => setNewMerchantEmail(e.target.value)} className="w-full px-3 py-2 rounded-xl border" />
+              <input required type="text" minLength={6} placeholder="Αρχικός Κωδικός *" value={newMerchantPassword} onChange={(e) => setNewMerchantPassword(e.target.value)} className="w-full px-3 py-2 rounded-xl border" />
+              <input required type="text" placeholder="Όνομα Καταστήματος *" value={newVenueName} onChange={(e) => setNewVenueName(e.target.value)} className="w-full px-3 py-2 rounded-xl border" />
+              <input required type="text" placeholder="Περιοχή *" value={newVenueArea} onChange={(e) => setNewVenueArea(e.target.value)} className="w-full px-3 py-2 rounded-xl border" />
+              <div className="flex gap-2">
+                <input required type="text" placeholder="Κατηγορία" value={newVenueCategory} onChange={(e) => setNewVenueCategory(e.target.value)} className="w-2/3 px-3 py-2 rounded-xl border" />
+                <input required type="number" min={10} placeholder="Τιμή €" value={newMonthlyPrice} onChange={(e) => setNewMonthlyPrice(Number(e.target.value))} className="w-1/3 px-3 py-2 rounded-xl border" />
+              </div>
+            </div>
+            <button type="submit" disabled={isSubmitting} className="px-5 py-2.5 bg-brand text-white font-bold rounded-xl disabled:opacity-50 cursor-pointer">
+              {isSubmitting ? "Καταχώριση..." : "+ Δημιουργία Συνεργάτη & Καταστήματος"}
             </button>
           </form>
         </section>
 
-        {/* 2. Λίστα Καταστημάτων & Έλεγχος Συνδρομών ανά Κατάστημα */}
         <section className="bg-card border border-border-theme p-6 rounded-3xl shadow-sm space-y-4">
-          <div className="flex justify-between items-center pb-3 border-b border-border-theme">
-            <div>
-              <h2 className="text-base font-bold text-text-main">
-                🏢 Εγγεγραμμένα Καταστήματα ({venues.length})
-              </h2>
-              <p className="text-xs text-text-muted">
-                Όταν αναστέλλετε τη συνδρομή ενός καταστήματος, κρύβεται αυτόματα από την αρχική σελίδα των πελατών και κλειδώνει ο πίνακας του εστιάτορα.
-              </p>
-            </div>
-          </div>
-
+          <h2 className="text-base font-bold">🏢 Εγγεγραμμένα Καταστήματα</h2>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs border-collapse">
               <thead>
-                <tr className="border-b border-border-theme text-text-muted uppercase text-[10px] tracking-wider">
+                <tr className="border-b uppercase text-[10px] tracking-wider text-text-muted">
                   <th className="py-3 px-3">Κατάστημα</th>
                   <th className="py-3 px-3">Περιοχή</th>
                   <th className="py-3 px-3">Email Συνεργάτη</th>
-                  <th className="py-3 px-3">Συνδρομή & Προβολή</th>
+                  <th className="py-3 px-3">Συνδρομή</th>
                   <th className="py-3 px-3 text-right">Ενέργειες</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border-theme">
                 {venues.map((v) => {
-                  const merchant = merchants.find(
-                    (m) =>
-                      m.id === v.ownerId ||
-                      m.email?.toLowerCase() === v.ownerEmail?.toLowerCase()
-                  );
-                  const status =
-                    v.subscriptionStatus || merchant?.subscription?.status || "active";
-                  const isPublished = v.isPublished !== false && status === "active";
-                  const price = v.monthlyPrice || merchant?.subscription?.monthlyPrice || 49;
-
+                  const isPublished = v.isPublished !== false && v.subscriptionStatus === "active";
                   return (
                     <tr key={v.id} className="hover:bg-subtle/50 transition">
-                      <td className="py-3 px-3 font-bold text-text-main">
-                        {v.name}
-                        <span className="block text-[10px] text-text-muted font-mono">
-                          /{v.slug}
-                        </span>
-                      </td>
+                      <td className="py-3 px-3 font-bold">{v.name}</td>
                       <td className="py-3 px-3 text-text-muted">{v.area}</td>
-                      <td className="py-3 px-3 font-mono text-text-main">
-                        {v.ownerEmail || "—"}
-                      </td>
+                      <td className="py-3 px-3 font-mono">{v.ownerEmail || "—"}</td>
                       <td className="py-3 px-3">
-                        <span
-                          className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
-                            isPublished
-                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                              : "bg-red-50 text-red-700 border-red-200"
-                          }`}
-                        >
-                          {isPublished
-                            ? `✓ Ενεργή (${price}€/μήνα) • Δημόσιο`
-                            : "⚠️ Σε Αναστολή • Κρυφό από Πελάτες"}
+                        <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${isPublished ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>
+                          {isPublished ? `✓ Ενεργή (${v.monthlyPrice}€)` : "⚠️ Σε Αναστολή"}
                         </span>
                       </td>
                       <td className="py-3 px-3 text-right space-x-2">
-                        <button
-                          type="button"
-                          onClick={() => toggleVenueSubscription(v)}
-                          className="px-2.5 py-1 bg-subtle hover:bg-border-theme text-text-main rounded-lg border border-border-theme font-medium transition cursor-pointer"
-                        >
-                          {isPublished ? "Αναστολή Συνδρομής" : "Ενεργοποίηση"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteVenue(v.id, v.name)}
-                          className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg border border-red-200 font-medium transition cursor-pointer"
-                        >
-                          Διαγραφή
+                        <button onClick={() => toggleVenueSubscription(v)} className="px-2.5 py-1.5 bg-subtle rounded-lg border font-medium cursor-pointer">
+                          {isPublished ? "Αναστολή" : "Ενεργοποίηση"}
                         </button>
                       </td>
                     </tr>

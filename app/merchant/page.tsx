@@ -13,6 +13,7 @@ import {
   getDoc,
   getDocs,
   updateDoc,
+  setDoc,
   query,
   where,
   serverTimestamp,
@@ -60,6 +61,7 @@ interface BookingRecord {
   date: string;
   status: "confirmed" | "used" | "checked_in" | "cancelled";
   orderMode?: "dine-in" | "takeaway";
+  customerId?: string; // <--- Πρόσθεσε αυτό!
 }
 
 interface SubscriptionInfo {
@@ -381,19 +383,25 @@ export default function MerchantDashboard() {
     }
   };
 
-  // #7: Ενεργοποίηση No-Show Bounty από ακύρωση κράτησης
+  // #7: Ενεργοποίηση No-Show Bounty & Μηδενισμός Streak Πελάτη
   const handleTriggerBounty = async (booking?: BookingRecord) => {
     if (!selectedVenue) return;
     try {
       if (booking) {
+        // Ακυρώνουμε την κράτηση
         await updateDoc(doc(db, "bookings", booking.id), { status: "cancelled" });
+        
+        // 🔴 ΝΕΟ: Ποινή No-Show (Μηδενίζουμε το Streak του!)
+        if (booking.customerId && booking.customerId !== "guest") {
+          await setDoc(doc(db, "users", booking.customerId), { streak: 0 }, { merge: true });
+        }
       }
       await updateShiftLive({
         bountyActive: true,
         bountyText: "-40% + Κερασμένο Ορεκτικό (No-Show Bounty 10')",
       });
       setNewBookingAlert(
-        `🎯 NO-SHOW BOUNTY ΕΝΕΡΓΟ! Εστάλη ειδοποίηση σε χρήστες εντός 500μ για άμεση αναπλήρωση του τραπεζιού μέσα σε 10 λεπτά!`
+        `🎯 NO-SHOW BOUNTY ΕΝΕΡΓΟ! Το σερί του πελάτη μηδενίστηκε.`
       );
     } catch (err) {
       console.error("Σφάλμα ενεργοποίησης Bounty:", err);

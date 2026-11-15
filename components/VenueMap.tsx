@@ -23,12 +23,7 @@ export interface MapVenue {
   microZoneType?: "student" | "office" | null;
 }
 
-interface GeocodedVenue extends MapVenue {
-  resolvedLat: number;
-  resolvedLng: number;
-}
-
-// Δημιουργία πινέζας με Badge Έκπτωσης (Σημείο 10)
+// Δημιουργία πινέζας με Badge Έκπτωσης
 const createDiscountPinIcon = (discount: string) => {
   return L.divIcon({
     className: "custom-venue-pin",
@@ -70,7 +65,7 @@ const createDiscountPinIcon = (discount: string) => {
   });
 };
 
-// Μπλε πινέζα για τη θέση του χρήστη (Σημείο 9)
+// Μπλε πινέζα για τη θέση του χρήστη
 const userLocationIcon = L.divIcon({
   className: "custom-user-pin",
   html: `
@@ -102,7 +97,7 @@ function MapBoundsUpdater({
   venues,
   userPos,
 }: {
-  venues: GeocodedVenue[];
+  venues: MapVenue[];
   userPos: [number, number] | null;
 }) {
   const map = useMap();
@@ -115,12 +110,9 @@ function MapBoundsUpdater({
     if (venues.length === 0) return;
 
     if (venues.length === 1 && !userPos) {
-      map.setView([venues[0].resolvedLat, venues[0].resolvedLng], 15);
+      map.setView([venues[0].lat, venues[0].lng], 15);
     } else {
-      const points: [number, number][] = venues.map((v) => [
-        v.resolvedLat,
-        v.resolvedLng,
-      ]);
+      const points: [number, number][] = venues.map((v) => [v.lat, v.lng]);
       if (userPos) points.push(userPos);
       const bounds = L.latLngBounds(points);
       map.fitBounds(bounds, { padding: [50, 50] });
@@ -131,60 +123,10 @@ function MapBoundsUpdater({
 }
 
 export default function VenueMap({ venues }: { venues: MapVenue[] }) {
-  const [resolvedVenues, setResolvedVenues] = useState<GeocodedVenue[]>([]);
-  const [userPosition, setUserPosition] = useState<[number, number] | null>(
-    null
-  );
+  const [userPosition, setUserPosition] = useState<[number, number] | null>(null);
   const [locating, setLocating] = useState(false);
 
-  // Αυτόματος εντοπισμός διεύθυνσης
-  useEffect(() => {
-    let isCancelled = false;
-
-    const resolveAddresses = async () => {
-      const results: GeocodedVenue[] = [];
-
-      for (const v of venues) {
-        let finalLat = v.lat;
-        let finalLng = v.lng;
-
-        if (v.address && v.address.trim().length > 0) {
-          try {
-            const queryStr = `${v.address}, ${v.area || "Αθήνα"}, Greece`;
-            const res = await fetch(
-              `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
-                queryStr
-              )}`
-            );
-            const data = await res.json();
-            if (data && data.length > 0) {
-              finalLat = parseFloat(data[0].lat);
-              finalLng = parseFloat(data[0].lon);
-            }
-          } catch (e) {
-            console.error("Geocoding failed for address:", v.address, e);
-          }
-        }
-
-        results.push({
-          ...v,
-          resolvedLat: finalLat,
-          resolvedLng: finalLng,
-        });
-      }
-
-      if (!isCancelled) {
-        setResolvedVenues(results);
-      }
-    };
-
-    resolveAddresses();
-    return () => {
-      isCancelled = true;
-    };
-  }, [venues]);
-
-  // Εντοπισμός Τοποθεσίας Χρήστη (Σημείο 9)
+  // Εντοπισμός Τοποθεσίας Χρήστη
   const handleLocateMe = () => {
     if (!navigator.geolocation) {
       alert("Η γεωγραφική τοποθεσία δεν υποστηρίζεται από τον browser σας.");
@@ -205,20 +147,17 @@ export default function VenueMap({ venues }: { venues: MapVenue[] }) {
     );
   };
 
-  const centerLat =
-    userPosition?.[0] ?? (resolvedVenues[0]?.resolvedLat || 37.9838);
-  const centerLng =
-    userPosition?.[1] ?? (resolvedVenues[0]?.resolvedLng || 23.7275);
+  const centerLat = userPosition?.[0] ?? (venues[0]?.lat || 37.9838);
+  const centerLng = userPosition?.[1] ?? (venues[0]?.lng || 23.7275);
 
   return (
-    <div className="w-full h-84 md:h-96 rounded-3xl overflow-hidden border border-neutral-800 shadow-2xl my-6 relative z-0">
-      {/* Κουμπί «Η Τοποθεσία μου» */}
+    <div className="w-full h-84 md:h-96 rounded-3xl overflow-hidden border border-border-theme shadow-2xl relative z-0">
       <div className="absolute top-4 right-4 z-[500]">
         <button
           type="button"
           onClick={handleLocateMe}
           disabled={locating}
-          className="bg-neutral-900/90 hover:bg-neutral-900 text-white border border-neutral-700 px-3 py-2 rounded-xl text-xs font-bold shadow-xl flex items-center gap-1.5 backdrop-blur-md transition cursor-pointer"
+          className="bg-card/90 hover:bg-card text-text-main border border-border-theme px-3 py-2 rounded-xl text-xs font-bold shadow-xl flex items-center gap-1.5 backdrop-blur-md transition cursor-pointer"
         >
           <span>📍</span>
           <span>{locating ? "Εντοπισμός..." : "Η Τοποθεσία μου"}</span>
@@ -236,13 +175,13 @@ export default function VenueMap({ venues }: { venues: MapVenue[] }) {
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        <MapBoundsUpdater venues={resolvedVenues} userPos={userPosition} />
+        <MapBoundsUpdater venues={venues} userPos={userPosition} />
 
         {/* Πινέζα Χρήστη */}
         {userPosition && (
           <Marker position={userPosition} icon={userLocationIcon}>
             <Popup>
-              <div className="p-1 font-bold text-xs text-slate-900">
+              <div className="p-1 font-bold text-xs text-text-main">
                 📍 Είστε εδώ!
               </div>
             </Popup>
@@ -250,38 +189,38 @@ export default function VenueMap({ venues }: { venues: MapVenue[] }) {
         )}
 
         {/* Πινέζες Καταστημάτων με ποσοστό έκπτωσης */}
-        {resolvedVenues.map((v, idx) => (
+        {venues.map((v, idx) => (
           <Marker
             key={`${v.name}-${idx}`}
-            position={[v.resolvedLat, v.resolvedLng]}
+            position={[v.lat, v.lng]}
             icon={createDiscountPinIcon(v.bestDiscount)}
           >
             <Popup className="custom-leaflet-popup">
               <div className="p-1 space-y-1.5 min-w-[190px]">
-                <h4 className="font-black text-slate-900 text-sm leading-tight">
+                <h4 className="font-black text-text-main text-sm leading-tight">
                   {v.name}
                 </h4>
 
-                <div className="text-[11px] text-slate-600 font-medium">
+                <div className="text-[11px] text-text-muted font-medium">
                   {v.category}
                 </div>
 
-                <div className="text-[11px] text-slate-800 bg-slate-100 p-2 rounded-xl border border-slate-200">
+                <div className="text-[11px] text-text-main bg-subtle p-2 rounded-xl border border-border-theme">
                   📍 <strong>{v.address || v.area}</strong>
                 </div>
 
                 <div className="flex items-center justify-between pt-1">
-                  <span className="text-[11px] font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-md">
+                  <span className="text-[11px] font-bold text-brand-text bg-brand-light border border-brand-border px-2 py-0.5 rounded-md">
                     Έως {v.bestDiscount}
                   </span>
 
                   <a
                     href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-                      `${v.name}${v.address || v.area}`
+                      `${v.name} ${v.address || v.area}`
                     )}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-[10px] text-blue-600 hover:underline font-bold"
+                    className="text-[10px] text-brand hover:underline font-bold"
                   >
                     Οδηγίες →
                   </a>

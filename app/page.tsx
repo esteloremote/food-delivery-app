@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
@@ -160,15 +160,23 @@ function useCountdown(timeWindow: string) {
   return timeLeft;
 }
 
+// Προσθέσαμε το userStreak στα props του component!
 function SlotItem({
   slot,
+  userStreak, // <--- ΝΕΟ
   onSelect,
 }: {
   slot: SlotDeal;
+  userStreak: number; // <--- ΝΕΟ
   onSelect: () => void;
 }) {
   const { label, isExpired } = useCountdown(slot.timeWindow);
-  const isAvailable = slot.availableTables > 0 && !isExpired;
+  
+  // Έλεγχος αν ο χρήστης έχει πρόσβαση στο VIP Deal
+  const isLockedVip = slot.isVipOnly && userStreak < 3; 
+  
+  // Είναι διαθέσιμο μόνο αν υπάρχουν τραπέζια, δεν έχει λήξει ΚΑΙ δεν είναι κλειδωμένο VIP
+  const isAvailable = slot.availableTables > 0 && !isExpired && !isLockedVip;
 
   return (
     <div
@@ -203,8 +211,8 @@ function SlotItem({
             </span>
           )}
           {slot.isVipOnly && (
-            <span className="text-[10px] font-bold bg-brand text-white px-2 py-0.5 rounded-full">
-              ⭐ VIP
+            <span className="text-[10px] font-bold bg-brand text-white px-2 py-0.5 rounded-full shadow-sm">
+              ⭐ VIP SECRET
             </span>
           )}
           {slot.microZoneOnly === "student" && (
@@ -260,7 +268,9 @@ function SlotItem({
             : "bg-subtle text-text-muted cursor-not-allowed shadow-none border border-border-theme"
         }`}
       >
-        {isExpired
+        {isLockedVip 
+          ? "🔒 Μόνο για VIPs" 
+          : isExpired
           ? "Έληξε"
           : slot.availableTables > 0
           ? slot.isBounty
@@ -300,10 +310,9 @@ export default function Home() {
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [userStreak, setUserStreak] = useState(2);
 
-  // #5, #6, #7 Live Smart States
+  // #5, #6, #7 Live Smart States (Πλέον συνδεδεμένα με τη Βάση!)
   const [rainModeActive, setRainModeActive] = useState(false);
-  const [showMissYouBanner, setShowMissYouBanner] = useState(true);
-  const [demoBountyActive, setDemoBountyActive] = useState(false);
+  const [showMissYouBanner, setShowMissYouBanner] = useState(false);
   const [bountyCountdown, setBountyCountdown] = useState(599);
 
   // #9 AI Mood Concierge State
@@ -327,11 +336,9 @@ export default function Home() {
   } | null>(null);
 
   useEffect(() => {
+    // Φόρτωση Theme
     const savedTheme = localStorage.getItem("happyseats_theme");
-    if (
-      savedTheme === "dark" ||
-      (!savedTheme && window.matchMedia("(prefers-color-scheme: dark)").matches)
-    ) {
+    if (savedTheme === "dark" || (!savedTheme && window.matchMedia("(prefers-color-scheme: dark)").matches)) {
       setIsDarkMode(true);
       document.documentElement.classList.add("dark");
     } else {
@@ -339,36 +346,74 @@ export default function Home() {
       document.documentElement.classList.remove("dark");
     }
 
-    const savedPass =
-      typeof window !== "undefined"
-        ? localStorage.getItem("happyseats_microzone_pass")
-        : null;
-
+    // Φόρτωση Pass
+    const savedPass = typeof window !== "undefined" ? localStorage.getItem("happyseats_microzone_pass") : null;
     if (savedPass) {
       try {
         const parsed = JSON.parse(savedPass);
-        queueMicrotask(() => {
-          setVerifiedPass(parsed);
-        });
-      } catch {
-        // ignore
-      }
+        queueMicrotask(() => setVerifiedPass(parsed));
+      } catch {}
     }
+
+    let unsubUser = () => {}; // Βοηθητικό για να κλείνουμε το listener
 
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
       if (user) {
         try {
-          const userSnap = await getDoc(doc(db, "users", user.uid));
-          if (userSnap.exists()) {
-            setUserStreak(userSnap.data().streak || 2);
+          // 🔴 ΑΛΛΑΓΗ: onSnapshot αντί για getDoc για να ενημερώνονται Live τα ☕!
+          unsubUser = onSnapshot(doc(db, "users", user.uid), (docSnap) => {
+            if (docSnap.exists()) {
+              setUserStreak(docSnap.data().streak ?? 0);
+            } else {
+              setUserStreak(0);
+            }
+          });
+
+          // 🤖 ΑΛΓΟΡΙΘΜΟΣ "MISS YOU": Έλεγχος τελευταίας επίσκεψης!
+          const qAll = query(collection(db, "bookings"), where("customerId", "==", user.uid));
+          const snapAll = await getDocs(qAll);
+          const pastBookings = snapAll.docs
+            .map((d) => d.data())
+            .filter((b) => b.status === "checked_in" || b.status === "used")
+            .sort((a, b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
+
+          if (pastBookings.length > 0) {
+            const lastCheckIn = pastBookings[0].createdAt?.toDate();
+            if (lastCheckIn) {
+              const diffTime = Math.abs(new Date().getTime() - lastCheckIn.getTime());
+              const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+              if (diffDays > 14) {
+                setShowMissYouBanner(true);
+              }
+            }
           }
-        } catch {
-          // ignore
+        } catch (err) {
+          console.error("Σφάλμα ανάκτησης ιστορικού:", err);
         }
+      } else {
+        unsubUser(); // Αν κάνει logout, σταματάμε να παρακολουθούμε
       }
     });
-    return () => unsubAuth();
+
+    // Ο κεντρικός διακόπτης του Admin λειτουργεί πλέον ως "Force Demo"
+    // (αν θες να το δείξεις σε παρουσίαση χωρίς να περιμένεις 14 μέρες)
+    const unsubSettings = onSnapshot(doc(db, "settings", "system"), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setRainModeActive(data.isRaining === true);
+        if (data.globalMissYou === true) {
+          setShowMissYouBanner(true); // Το κάνουμε Force από τον Admin
+        }
+      } else {
+        setRainModeActive(false);
+      }
+    });
+
+    return () => {
+      unsubAuth();
+      unsubSettings();
+    };
   }, []);
 
   // Χρονόμετρο αντίστροφης μέτρησης για τα No-Show Bounties (10')
@@ -518,17 +563,6 @@ export default function Home() {
       notes.push("ιδανικό για καφέ/πρωινό ή laptop");
     }
 
-    if (
-      text.includes("ραντεβού") ||
-      text.includes("ζεστ") ||
-      text.includes("σόμπ") ||
-      text.includes("βροχ") ||
-      text.includes("weather")
-    ) {
-      setRainModeActive(true);
-      notes.push("🌧️ ενεργοποίηση Weather Auto-Deals (-20%)");
-    }
-
     if (text.includes("αγών") || text.includes("μπύρ") || text.includes("μπάλα")) {
       if (venueList.some((v) => (v.vibeTags || []).includes("⚽ Δείχνει αγώνα"))) {
         detectedVibes.push("⚽ Δείχνει αγώνα");
@@ -536,14 +570,13 @@ export default function Home() {
       notes.push("προβολή αγώνα & μπύρες");
     }
 
-    if (
-      text.includes("bounty") ||
-      text.includes("ακύρωσ") ||
-      text.includes("μεγάλη έκπτωση")
-    ) {
-      setDemoBountyActive(true);
+    if (text.includes("ραντεβού") || text.includes("ζεστ") || text.includes("σόμπ") || text.includes("βροχ")) {
+      notes.push("cozy ατμόσφαιρα");
+    }
+
+    if (text.includes("bounty") || text.includes("ακύρωσ") || text.includes("μεγάλη έκπτωση") || text.includes("προσφορ")) {
       detectedDiscount = 30;
-      notes.push("🎯 No-Show Bounties (-40% + Κέρασμα)");
+      notes.push("μεγάλες εκπτώσεις (άνω του 30%)");
     }
 
     setSelectedArea(detectedArea);
@@ -553,7 +586,7 @@ export default function Home() {
     const bestVenueName = venueList[0]?.name || "HappySeats";
     if (requestedAreaName && detectedArea === "all") {
       setAiResponse(
-        `✨ Ο AI Μετρ είδε ότι ψάχνεις για «${requestedAreaName}». Επειδή δεν υπάρχει διαθέσιμο τραπέζι εκεί αυτή τη στιγμή, σου βρήκε τις καλύτερες εναλλακτικές προσφορές (π.χ. στο ${bestVenueName})!`
+        `✨ Ο AI Μετρ είδε ότι ψάχνεις για «${requestedAreaName}». Επειδή δεν υπάρχει διαθέσιμο τραπέζι εκεί αυτή τη στιγμή, σου βρήκε τις καλύτερες εναλλακτικές (π.χ. στο ${bestVenueName})!`
       );
     } else if (notes.length > 0) {
       setAiResponse(
@@ -561,7 +594,7 @@ export default function Home() {
       );
     } else {
       setAiResponse(
-        `✨ Ο AI Μετρ ανέλυσε το αίτημά σου («${inputQuery}») και ξεχώρισε τα τραπέζια με τη μεγαλύτερη έκπτωση αυτή τη στιγμή!`
+        `✨ Ο AI Μετρ ανέλυσε το αίτημά σου («${inputQuery}») και ξεχώρισε τα καλύτερα τραπέζια αυτή τη στιγμή!`
       );
     }
   };
@@ -587,13 +620,15 @@ export default function Home() {
       `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
     const panicWindow = `${formatTime(now)} - ${formatTime(oneHourLater)}`;
 
-    return venueList.map((v, idx) => {
-      const matchedSlots = [
-        ...slotList.filter((s) => s.venueName === v.name || s.venueId === v.id),
-      ];
+    return venueList.map((v) => {
+      // 🛠️ FIX: Κάνουμε "βαθύ αντίγραφο" (.map(s => ({ ...s }))) των slots, 
+      // ώστε να μην αλλοιώνουμε τα πρωτότυπα δεδομένα στη μνήμη!
+      const matchedSlots = slotList
+        .filter((s) => s.venueName === v.name || s.venueId === v.id)
+        .map((s) => ({ ...s }));
 
-      // #7 No-Show Bounty Slot
-      if (v.bountyActive || (demoBountyActive && idx === 0)) {
+      // #7 No-Show Bounty Slot (Ελέγχεται πλέον ΑΠΟΚΛΕΙΣΤΙΚΑ από το μαγαζί, βγάλαμε το demo!)
+      if (v.bountyActive) {
         matchedSlots.unshift({
           id: `bounty-${v.id}`,
           venueId: v.id,
@@ -621,8 +656,8 @@ export default function Home() {
         });
       }
 
-      // #5 Weather-Triggered Deal Slot
-      if (v.rainAutoDeal || rainModeActive) {
+      // #5 Weather-Triggered Deal Slot (Ενεργοποιείται αν βρέχει ΚΑΙ το μαγαζί το έχει ON)
+      if (rainModeActive && v.rainAutoDeal) {
         matchedSlots.push({
           id: `rain-${v.id}`,
           venueId: v.id,
@@ -654,12 +689,30 @@ export default function Home() {
         });
       }
 
+      // 💌 ΝΕΟ: Εφαρμογή του Miss You Perk στα slots (Εφαρμόζεται ΠΑΝΤΑ σε "φρέσκα" slots)
+      if (showMissYouBanner && v.missYouCampaign) {
+        matchedSlots.forEach((s) => {
+          if (!s.bonusPerk) {
+            s.bonusPerk = "💌 + 1 Κερασμένο Γλυκό/Καφές (Miss You)";
+          } else if (!s.bonusPerk.includes("Miss You")) {
+            s.bonusPerk = `${s.bonusPerk} | 💌 Κέρασμα (Miss You)`;
+          }
+        });
+      }
+
       return {
         ...v,
         slots: matchedSlots,
       };
     });
-  }, [venueList, slotList, verifiedPass, demoBountyActive, bountyCountdown, rainModeActive]);
+  }, [
+    venueList,
+    slotList,
+    verifiedPass,
+    bountyCountdown,
+    rainModeActive,
+    showMissYouBanner,
+  ]);
 
   const availableAreas = useMemo(() => {
     const areas = new Set<string>();
@@ -974,7 +1027,6 @@ export default function Home() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Dark/Light Mode Toggle */}
           <button
             type="button"
             onClick={toggleDarkMode}
@@ -1165,69 +1217,31 @@ export default function Home() {
           </div>
         )}
 
-        {/* #5, #6, #7 LIVE SMART RADAR BAR */}
-        <section className="bg-card border border-border-theme rounded-3xl p-4 shadow-sm flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-sky-500/15 border border-sky-400/30 flex items-center justify-center text-xl shrink-0">
-              {rainModeActive ? "🌧️" : "☀️"}
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-black uppercase tracking-widest bg-sky-600 text-white px-2 py-0.5 rounded-md">
-                  #5 LIVE WEATHER RADAR
-                </span>
-                <span className="text-xs font-bold text-text-main">
-                  {rainModeActive
-                    ? "Εντοπίστηκε Βροχόπτωση — Ενεργά τα Weather Auto-Deals (-20%)"
-                    : "Καθαρός Καιρός — Κανονική ροή προσφορών"}
-                </span>
+        {/* 🔴 LIVE WEATHER RADAR BAR (Εμφανίζεται ΜΟΝΟ όταν βρέχει στο σύστημα!) */}
+        {rainModeActive && (
+          <section className="bg-sky-50 border-2 border-sky-400 rounded-3xl p-4 shadow-sm flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 animate-pulse">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-sky-500 text-white flex items-center justify-center text-xl shrink-0">
+                🌧️
               </div>
-              <p className="text-[11px] text-text-muted mt-0.5">
-                Ο αλγόριθμος ενεργοποιεί αυτόματα εκπτώσεις σε κοντινά στεγασμένα στέκια μόλις χαλάσει ο καιρός.
-              </p>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-black uppercase tracking-widest bg-sky-600 text-white px-2 py-0.5 rounded-md">
+                    LIVE WEATHER RADAR
+                  </span>
+                  <span className="text-xs font-bold text-sky-900">
+                    Εντοπίστηκε Βροχόπτωση στην Αθήνα
+                  </span>
+                </div>
+                <p className="text-[11px] text-sky-800 mt-0.5">
+                  Ενεργοποιήθηκαν αυτόματα τα <strong>Weather Deals (-20%)</strong> σε επιλεγμένα στεγασμένα καταστήματα!
+                </p>
+              </div>
             </div>
-          </div>
+          </section>
+        )}
 
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => setRainModeActive(!rainModeActive)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer ${
-                rainModeActive
-                  ? "bg-sky-600 text-white border-sky-600 shadow-sm"
-                  : "bg-subtle text-text-muted border-border-theme"
-              }`}
-            >
-              🌧️ Weather Deals: {rainModeActive ? "ON" : "OFF"}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setDemoBountyActive(!demoBountyActive)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer ${
-                demoBountyActive
-                  ? "bg-amber-400 text-neutral-950 border-amber-500 shadow-sm"
-                  : "bg-subtle text-text-muted border-border-theme"
-              }`}
-            >
-              🎯 No-Show Bounty: {demoBountyActive ? "ON" : "OFF"}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setShowMissYouBanner(!showMissYouBanner)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer ${
-                showMissYouBanner
-                  ? "bg-purple-600 text-white border-purple-600 shadow-sm"
-                  : "bg-subtle text-text-muted border-border-theme"
-              }`}
-            >
-              💌 &ldquo;Miss You&rdquo; Κουπόνι: {showMissYouBanner ? "ON" : "OFF"}
-            </button>
-          </div>
-        </section>
-
-        {/* #6 AUTO "MISS YOU" CAMPAIGN BANNER */}
+        {/* 🔴 AUTO "MISS YOU" CAMPAIGN BANNER */}
         {showMissYouBanner && (
           <section className="p-4 rounded-3xl bg-purple-500/10 border-2 border-purple-400/40 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm">
             <div className="flex items-center gap-3">
@@ -1568,7 +1582,7 @@ export default function Home() {
                           }}
                           className="text-[11px] font-bold text-brand-text hover:opacity-80 flex items-center gap-1 cursor-pointer"
                         >
-                          🤝 Κράτα το για την παρέα (15&apos;)
+                          🤝 Κράτα το (15&apos;)
                         </button>
                       )}
                     </div>
@@ -1585,14 +1599,11 @@ export default function Home() {
                         >
                           <SlotItem
                             slot={slot}
+                            userStreak={userStreak} // <--- Πρόσθεσε αυτό εδώ!
                             onSelect={() => {
                               setSelectedVenue(venue);
                               setSelectedSlot(slot);
-                              setOrderMode(
-                                venue.tableStatus === "full"
-                                  ? "takeaway"
-                                  : "dine-in"
-                              );
+                              setOrderMode(venue.tableStatus === "full" ? "takeaway" : "dine-in");
                             }}
                           />
                         </div>

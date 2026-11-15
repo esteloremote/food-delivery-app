@@ -13,6 +13,7 @@ import {
   getDoc,
   updateDoc,
   doc,
+  setDoc,
   serverTimestamp,
 } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
@@ -142,6 +143,17 @@ export default function MerchantScanPage() {
         checkedInAt: serverTimestamp(),
         checkedInBy: currentUser?.email || "",
       });
+
+      // 🔴 ΝΕΟ: Ενημέρωση VIP Streak Πελάτη (+1)
+      if (data.customerId && data.customerId !== "guest") {
+        const userRef = doc(db, "users", data.customerId);
+        const userSnap = await getDoc(userRef);
+        let newStreak = 1; // Αν δεν έχει ξαναπάει κάπου, ξεκινάει με 1
+        if (userSnap.exists()) {
+          newStreak = Math.min((userSnap.data().streak || 0) + 1, 3); // Max 3 καφεδάκια!
+        }
+        await setDoc(userRef, { streak: newStreak }, { merge: true });
+      }
 
       setScanResult({
         success: true,
