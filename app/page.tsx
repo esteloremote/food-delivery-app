@@ -1,82 +1,39 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useState, useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
+import Link from "next/link";
+import { QRCodeSVG } from "qrcode.react";
 import { onAuthStateChanged, signOut, User } from "firebase/auth";
 import {
   collection,
   onSnapshot,
-  addDoc,
   doc,
   getDoc,
-  updateDoc,
+  runTransaction,
   serverTimestamp,
+  query,
+  where,
+  getDocs,
 } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
+import type { TableStatus } from "@/components/VenueMap";
 
-// Δυναμική φόρτωση του χάρτη ΜΟΝΟ στον browser (λύνει οριστικά το "window is not defined")
 const VenueMap = dynamic(() => import("@/components/VenueMap"), {
   ssr: false,
   loading: () => (
-    <div className="w-full h-full flex items-center justify-center text-xs text-text-muted">
+    <div className="w-full h-80 bg-subtle rounded-3xl border border-border-theme flex items-center justify-center text-xs text-text-muted my-6">
       Φόρτωση διαδραστικού χάρτη...
     </div>
   ),
 });
-
-// --- ΤΥΠΟΙ ΔΕΔΟΜΕΝΩΝ ---
-export type TableStatus = "plenty" | "few" | "full";
-
-interface VenueDoc {
-  id: string;
-  name: string;
-  slug: string;
-  category?: string;
-  area?: string;
-  address?: string;
-  imageUrl?: string;
-  tableStatus?: TableStatus;
-  takeawayReady?: boolean;
-  panicDealActive?: boolean;
-  panicDealText?: string;
-  vibeTags?: string[];
-  lat?: number;
-  lng?: number;
-  rainAutoDeal?: boolean;
-  missYouCampaign?: boolean;
-  bountyActive?: boolean;
-  bountyText?: string;
-}
-
-interface SlotDeal {
-  id: string;
-  venueId?: string;
-  venueName: string;
-  timeWindow: string;
-  discount: string;
-  availableTables: number;
-  totalTables: number;
-  isVipOnly?: boolean;
-  isBounty?: boolean;
-  isRainDeal?: boolean;
-  bonusPerk?: string;
-}
 
 export const VIBE_OPTIONS = [
   "☀️ Έχει ήλιο έξω",
   "🔥 Σόμπες αναμμένες",
   "💻 Χαλαρό για δουλειά",
   "⚽ Δείχνει αγώνα",
-];
-
-const AREAS = [
-  "Όλες οι περιοχές",
-  "Κολωνάκι",
-  "Παγκράτι",
-  "Χαλάνδρι",
-  "Γλυφάδα",
-  "Νίκαια",
 ];
 
 const AI_QUICK_PROMPTS = [
@@ -98,52 +55,277 @@ const AI_QUICK_PROMPTS = [
   },
 ];
 
+interface SlotDeal {
+  id: string;
+  venueId?: string;
+  venueName: string;
+  timeWindow: string;
+  discount: string;
+  availableTables: number;
+  totalTables: number;
+  isPanicSlot?: boolean;
+  isBounty?: boolean;
+  isRainDeal?: boolean;
+  isVipOnly?: boolean;
+  bonusPerk?: string;
+  microZoneOnly?: "student" | "office" | null;
+}
+
+interface VenueDoc {
+  id: string;
+  slug: string;
+  name: string;
+  category: string;
+  area: string;
+  address: string;
+  image: string;
+  lat: number;
+  lng: number;
+  tableStatus: TableStatus;
+  takeawayReady: boolean;
+  panicDealActive: boolean;
+  panicDealText: string;
+  vibeTags: string[];
+  microZoneType: "student" | "office" | null;
+  rainAutoDeal?: boolean;
+  missYouCampaign?: boolean;
+  bountyActive?: boolean;
+  bountyText?: string;
+  isPublished?: boolean;
+  subscriptionStatus?: string;
+}
+
+interface VenueWithSlots extends VenueDoc {
+  slots: SlotDeal[];
+}
+
+interface Booking {
+  ticketCode: string;
+  venueName: string;
+  timeWindow: string;
+  discount: string;
+  partySize: number;
+  date: string;
+  orderMode?: "dine-in" | "takeaway";
+}
+
+function useCountdown(timeWindow: string) {
+  const [timeLeft, setTimeLeft] = useState<{ label: string; isExpired: boolean }>({
+    label: "",
+    isExpired: false,
+  });
+
+  useEffect(() => {
+    const calculateTime = () => {
+      const parts = timeWindow.split("-");
+      if (parts.length < 2) return;
+
+      const endPart = parts[1].trim();
+      const [endHourStr, endMinuteStr] = endPart.split(":");
+      const endHour = parseInt(endHourStr, 10);
+      const endMinute = parseInt(endMinuteStr, 10);
+
+      if (isNaN(endHour) || isNaN(endMinute)) return;
+
+      const now = new Date();
+      const target = new Date();
+      target.setHours(endHour, endMinute, 0, 0);
+
+      const diff = target.getTime() - now.getTime();
+
+      if (diff <= 0) {
+        setTimeLeft({ label: "Έληξε", isExpired: true });
+        return;
+      }
+
+      const hours = Math.floor(diff / (1000 * 60 * 60));
+      const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+      const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+
+      if (hours > 0) {
+        setTimeLeft({ label: `${hours}ώ ${minutes}λ`, isExpired: false });
+      } else {
+        setTimeLeft({
+          label: `${minutes}λ ${seconds < 10 ? "0" : ""}${seconds}δ`,
+          isExpired: false,
+        });
+      }
+    };
+
+    calculateTime();
+    const interval = setInterval(calculateTime, 1000);
+    return () => clearInterval(interval);
+  }, [timeWindow]);
+
+  return timeLeft;
+}
+
+function SlotItem({
+  slot,
+  onSelect,
+}: {
+  slot: SlotDeal;
+  onSelect: () => void;
+}) {
+  const { label, isExpired } = useCountdown(slot.timeWindow);
+  const isAvailable = slot.availableTables > 0 && !isExpired;
+
+  return (
+    <div
+      className={`p-3 rounded-2xl border flex items-center justify-between transition ${
+        slot.isBounty
+          ? "bg-amber-400/15 border-2 border-amber-500"
+          : slot.isPanicSlot
+          ? "bg-red-50 border-red-200"
+          : slot.isRainDeal
+          ? "bg-sky-500/10 border-sky-400"
+          : slot.microZoneOnly
+          ? "bg-indigo-50 border-indigo-200"
+          : "bg-subtle/80 border-border-theme hover:border-brand"
+      }`}
+    >
+      <div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-bold text-text-main">{slot.timeWindow}</span>
+          {slot.isBounty && (
+            <span className="text-[10px] font-black bg-amber-400 text-neutral-950 px-2 py-0.5 rounded-full">
+              🎯 NO-SHOW BOUNTY
+            </span>
+          )}
+          {slot.isPanicSlot && (
+            <span className="text-[10px] font-extrabold bg-red-600 text-white px-2 py-0.5 rounded-full animate-pulse">
+              🔥 FLASH DEAL
+            </span>
+          )}
+          {slot.isRainDeal && (
+            <span className="text-[10px] font-extrabold bg-sky-600 text-white px-2 py-0.5 rounded-full">
+              🌧️ WEATHER DEAL
+            </span>
+          )}
+          {slot.isVipOnly && (
+            <span className="text-[10px] font-bold bg-brand text-white px-2 py-0.5 rounded-full">
+              ⭐ VIP
+            </span>
+          )}
+          {slot.microZoneOnly === "student" && (
+            <span className="text-[10px] font-bold bg-purple-100 text-purple-700 border border-purple-200 px-2 py-0.5 rounded-full">
+              🎓 Φοιτητικό Πάσο
+            </span>
+          )}
+          {slot.microZoneOnly === "office" && (
+            <span className="text-[10px] font-bold bg-blue-100 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-full">
+              💼 Office Break
+            </span>
+          )}
+          {label && (
+            <span
+              className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
+                isExpired
+                  ? "bg-red-100 text-red-700 border border-red-200"
+                  : "bg-brand-light text-brand-text border border-brand-border"
+              }`}
+            >
+              ⏳ {label}
+            </span>
+          )}
+        </div>
+        <div className="text-xs text-brand-text font-bold mt-0.5">
+          {slot.discount} {slot.bonusPerk && <span className="ml-1">{slot.bonusPerk}</span>}
+        </div>
+        <div className="text-[11px] text-text-muted">
+          {isExpired
+            ? "Η προσφορά ολοκληρώθηκε"
+            : slot.availableTables > 0
+            ? `${slot.availableTables} τραπέζια απομένουν`
+            : "Εξαντλήθηκε"}
+        </div>
+      </div>
+
+      <button
+        type="button"
+        disabled={!isAvailable}
+        onClick={(e) => {
+          e.stopPropagation();
+          onSelect();
+        }}
+        className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer shadow-sm shrink-0 ${
+          isAvailable
+            ? slot.isBounty
+              ? "bg-amber-400 hover:bg-amber-500 text-neutral-950 font-black"
+              : slot.isPanicSlot
+              ? "bg-red-600 hover:bg-red-500 text-white shadow-red-600/20"
+              : slot.isRainDeal
+              ? "bg-sky-600 hover:bg-sky-700 text-white"
+              : "bg-brand hover:bg-brand-hover text-white"
+            : "bg-subtle text-text-muted cursor-not-allowed shadow-none border border-border-theme"
+        }`}
+      >
+        {isExpired
+          ? "Έληξε"
+          : slot.availableTables > 0
+          ? slot.isBounty
+            ? "🎯 Bounty"
+            : "Κράτηση"
+          : "Full"}
+      </button>
+    </div>
+  );
+}
+
 export default function Home() {
+  const router = useRouter();
   const [currentUser, setCurrentUser] = useState<User | null>(null);
 
-  // Φίλτρα
-  const [selectedArea, setSelectedArea] = useState("all");
-  const [minDiscount, setMinDiscount] = useState(0);
-  const [activeVibes, setActiveVibes] = useState<string[]>([]);
+  const [venueList, setVenueList] = useState<VenueDoc[]>([]);
+  const [slotList, setSlotList] = useState<SlotDeal[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  // #5, #6, #7 Live States (συγχρονίζονται με το Firebase ΚΑΙ μπορούν να δοκιμαστούν live)
-  const [rainModeActive, setRainModeActive] = useState(true); // Ενεργό default για να φαίνεται αμέσως το #5 Weather Deal
-  const [showMissYouBanner, setShowMissYouBanner] = useState(true); // Ενεργό για επίδειξη του #6 Auto "Miss You"
-  const [demoBountyActive, setDemoBountyActive] = useState(true); // Ενεργό για επίδειξη του #7 No-Show Bounty
-  const [bountyCountdown, setBountyCountdown] = useState(599); // 10 λεπτά (599 δευτ.)
+  const [selectedVenue, setSelectedVenue] = useState<VenueDoc | null>(null);
+  const [selectedSlot, setSelectedSlot] = useState<SlotDeal | null>(null);
+  const [partySize, setPartySize] = useState(2);
+  const [orderMode, setOrderMode] = useState<"dine-in" | "takeaway">("dine-in");
+  const [currentBooking, setCurrentBooking] = useState<Booking | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Φίλτρα
+  const [searchTerm, setSearchTerm] = useState("");
+  const [selectedArea, setSelectedArea] = useState("all");
+  const [minDiscount, setMinDiscount] = useState<number>(0);
+  const [selectedVibes, setSelectedVibes] = useState<string[]>([]);
+  const [onlyPanicDeals, setOnlyPanicDeals] = useState(false);
+  const [onlyTakeaway, setOnlyTakeaway] = useState(false);
+  const [showMap, setShowMap] = useState(false);
+
+  // Dark/Light Mode & Gamification Streak
+  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [userStreak, setUserStreak] = useState(2);
+
+  // #5, #6, #7 Live Smart States
+  const [rainModeActive, setRainModeActive] = useState(false);
+  const [showMissYouBanner, setShowMissYouBanner] = useState(true);
+  const [demoBountyActive, setDemoBountyActive] = useState(false);
+  const [bountyCountdown, setBountyCountdown] = useState(599);
 
   // #9 AI Mood Concierge State
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiResponse, setAiResponse] = useState<string | null>(null);
 
-  // Δυναμικά Δεδομένα (Firebase)
-  const [venues, setVenues] = useState<VenueDoc[]>([]);
-  const [slots, setSlots] = useState<SlotDeal[]>([]);
+  // 15-Minute Squad Hold
+  const [squadHold, setSquadHold] = useState<{
+    venueName: string;
+    expiresAt: number;
+    friendsJoined: number;
+  } | null>(null);
+  const [squadSecondsLeft, setSquadSecondsLeft] = useState<number>(0);
 
-  // B2B "Office Break" State
-  const [showB2bModal, setShowB2bModal] = useState(false);
-  const [b2bEmail, setB2bEmail] = useState("");
-  const [isB2bVerified, setIsB2bVerified] = useState(false);
+  // Micro-Zones Pass
+  const [showPassModal, setShowPassModal] = useState(false);
+  const [passEmailInput, setPassEmailInput] = useState("");
+  const [verifiedPass, setVerifiedPass] = useState<{
+    type: "student" | "office";
+    email: string;
+  } | null>(null);
 
-  // Gamification (Streak)
-  const [userStreak, setUserStreak] = useState(2);
-
-  // Dark/Light Mode State
-  const [isDarkMode, setIsDarkMode] = useState(false);
-
-  // Κλείδωμα Παρέας (15') State
-  const [lockingSlotId, setLockingSlotId] = useState<string | null>(null);
-  const [lockedSlots, setLockedSlots] = useState<{ [key: string]: number }>({});
-  const timerRefs = useRef<{ [key: string]: ReturnType<typeof setInterval> }>({});
-
-  // Κράτηση (Booking Modal) State
-  const [bookingSlot, setBookingSlot] = useState<SlotDeal | null>(null);
-  const [partySize, setPartySize] = useState(2);
-  const [orderMode, setOrderMode] = useState<"dine-in" | "takeaway">("dine-in");
-  const [isSubmittingBooking, setIsSubmittingBooking] = useState(false);
-  const [bookedTicketCode, setBookedTicketCode] = useState<string | null>(null);
-
-  // 1. Initial Load & Firebase Listeners
   useEffect(() => {
     const savedTheme = localStorage.getItem("happyseats_theme");
     if (
@@ -157,6 +339,22 @@ export default function Home() {
       document.documentElement.classList.remove("dark");
     }
 
+    const savedPass =
+      typeof window !== "undefined"
+        ? localStorage.getItem("happyseats_microzone_pass")
+        : null;
+
+    if (savedPass) {
+      try {
+        const parsed = JSON.parse(savedPass);
+        queueMicrotask(() => {
+          setVerifiedPass(parsed);
+        });
+      } catch {
+        // ignore
+      }
+    }
+
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
       if (user) {
@@ -165,33 +363,12 @@ export default function Home() {
           if (userSnap.exists()) {
             setUserStreak(userSnap.data().streak || 2);
           }
-        } catch (e) {
-          console.error(e);
+        } catch {
+          // ignore
         }
       }
     });
-
-    const unsubVenues = onSnapshot(collection(db, "venues"), (snap) => {
-      const list: VenueDoc[] = [];
-      snap.forEach((docSnap) => {
-        list.push({ id: docSnap.id, ...(docSnap.data() as Omit<VenueDoc, "id">) });
-      });
-      setVenues(list);
-    });
-
-    const unsubSlots = onSnapshot(collection(db, "slots"), (snap) => {
-      const list: SlotDeal[] = [];
-      snap.forEach((docSnap) => {
-        list.push({ id: docSnap.id, ...(docSnap.data() as Omit<SlotDeal, "id">) });
-      });
-      setSlots(list);
-    });
-
-    return () => {
-      unsubAuth();
-      unsubVenues();
-      unsubSlots();
-    };
+    return () => unsubAuth();
   }, []);
 
   // Χρονόμετρο αντίστροφης μέτρησης για τα No-Show Bounties (10')
@@ -202,7 +379,79 @@ export default function Home() {
     return () => clearInterval(interval);
   }, []);
 
-  // 2. Toggle Dark Mode
+  useEffect(() => {
+    if (!squadHold) return;
+    const interval = setInterval(() => {
+      const diff = Math.max(0, Math.floor((squadHold.expiresAt - Date.now()) / 1000));
+      setSquadSecondsLeft(diff);
+      if (diff <= 0) {
+        setSquadHold(null);
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [squadHold]);
+
+  useEffect(() => {
+    const unsubVenues = onSnapshot(collection(db, "venues"), (snap) => {
+      const vArr: VenueDoc[] = [];
+      snap.docs.forEach((d, index) => {
+        const data = d.data();
+        // Αν το κατάστημα έχει τεθεί σε αναστολή συνδρομής από τον Admin, ΔΕΝ εμφανίζεται στους πελάτες!
+        if (data.isPublished === false || data.subscriptionStatus === "past_due") {
+          return;
+        }
+        const defaultVibes =
+          index % 2 === 0
+            ? ["☀️ Έχει ήλιο έξω", "💻 Χαλαρό για δουλειά"]
+            : ["🔥 Σόμπες αναμμένες", "⚽ Δείχνει αγώνα"];
+
+        vArr.push({
+          id: d.id,
+          slug: data.slug || d.id,
+          name: data.name || "Κατάστημα",
+          category: data.category || "Εστίαση",
+          area: data.area || "Αθήνα",
+          address: data.address || "",
+          image:
+            data.image ||
+            data.imageUrl ||
+            "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=600&q=80",
+          lat: Number(data.lat) || 37.9753 + index * 0.004,
+          lng: Number(data.lng) || 23.7361 + index * 0.004,
+          tableStatus: (data.tableStatus as TableStatus) || "plenty",
+          takeawayReady: data.takeawayReady !== undefined ? Boolean(data.takeawayReady) : true,
+          panicDealActive: Boolean(data.panicDealActive),
+          panicDealText: data.panicDealText || "-30% στα επόμενα 3 τραπέζια (1 ώρα)",
+          vibeTags: Array.isArray(data.vibeTags) ? data.vibeTags : defaultVibes,
+          microZoneType:
+            data.microZoneType || (index % 2 === 0 ? "office" : "student"),
+          rainAutoDeal: Boolean(data.rainAutoDeal),
+          missYouCampaign: Boolean(data.missYouCampaign),
+          bountyActive: Boolean(data.bountyActive),
+          bountyText: data.bountyText || "-40% + Δωρεάν Ορεκτικό (Bounty 10')",
+          isPublished: data.isPublished !== undefined ? Boolean(data.isPublished) : true,
+          subscriptionStatus: data.subscriptionStatus || "active",
+        });
+      });
+      setVenueList(vArr);
+      setLoading(false);
+    });
+
+    return () => unsubVenues();
+  }, []);
+
+  useEffect(() => {
+    const unsubSlots = onSnapshot(collection(db, "slots"), (snap) => {
+      const sArr: SlotDeal[] = [];
+      snap.forEach((d) => {
+        sArr.push({ id: d.id, ...(d.data() as Omit<SlotDeal, "id">) });
+      });
+      setSlotList(sArr);
+    });
+
+    return () => unsubSlots();
+  }, []);
+
   const toggleDarkMode = () => {
     if (isDarkMode) {
       document.documentElement.classList.remove("dark");
@@ -215,7 +464,13 @@ export default function Home() {
     }
   };
 
-  // 3. #9 AI Mood Concierge Logic (Έξυπνη ανάλυση φυσικής γλώσσας)
+  const formatBountyTime = (seconds: number) => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  };
+
+  // #9 AI Mood Concierge Logic
   const runAiConcierge = (inputQuery: string) => {
     const text = inputQuery.toLowerCase();
     let detectedArea = "all";
@@ -223,8 +478,7 @@ export default function Home() {
     let detectedDiscount = 0;
     const notes: string[] = [];
 
-    // Έλεγχος αν η περιοχή που έγραψε ο χρήστης υπάρχει όντως στα καταστήματα της βάσης
-    const availableAreasInDb = venues
+    const availableAreasInDb = venueList
       .map((v) => v.area)
       .filter((a): a is string => Boolean(a));
 
@@ -234,13 +488,14 @@ export default function Home() {
       { key: "χαλάνδρι", alt: "χαλανδρι", name: "Χαλάνδρι" },
       { key: "γλυφάδα", alt: "γλυφαδα", name: "Γλυφάδα" },
       { key: "νίκαια", alt: "νικαια", name: "Νίκαια" },
+      { key: "πλάκα", alt: "πλακα", name: "Πλάκα" },
     ];
 
     let requestedAreaName: string | null = null;
     for (const a of areaKeywords) {
       if (text.includes(a.key) || text.includes(a.alt)) {
         requestedAreaName = a.name;
-        if (availableAreasInDb.includes(a.name)) {
+        if (availableAreasInDb.some((dbArea) => dbArea.toLowerCase() === a.name.toLowerCase())) {
           detectedArea = a.name;
           notes.push(`περιοχή ${a.name}`);
         }
@@ -257,7 +512,7 @@ export default function Home() {
       text.includes("πρωινό") ||
       text.includes("καφέ")
     ) {
-      if (venues.some((v) => (v.vibeTags || []).includes("💻 Χαλαρό για δουλειά"))) {
+      if (venueList.some((v) => (v.vibeTags || []).includes("💻 Χαλαρό για δουλειά"))) {
         detectedVibes.push("💻 Χαλαρό για δουλειά");
       }
       notes.push("ιδανικό για καφέ/πρωινό ή laptop");
@@ -275,7 +530,7 @@ export default function Home() {
     }
 
     if (text.includes("αγών") || text.includes("μπύρ") || text.includes("μπάλα")) {
-      if (venues.some((v) => (v.vibeTags || []).includes("⚽ Δείχνει αγώνα"))) {
+      if (venueList.some((v) => (v.vibeTags || []).includes("⚽ Δείχνει αγώνα"))) {
         detectedVibes.push("⚽ Δείχνει αγώνα");
       }
       notes.push("προβολή αγώνα & μπύρες");
@@ -292,13 +547,13 @@ export default function Home() {
     }
 
     setSelectedArea(detectedArea);
-    setActiveVibes(detectedVibes);
+    setSelectedVibes(detectedVibes);
     setMinDiscount(detectedDiscount);
 
-    const bestVenueName = venues[0]?.name || "Estelo";
+    const bestVenueName = venueList[0]?.name || "HappySeats";
     if (requestedAreaName && detectedArea === "all") {
       setAiResponse(
-        `✨ Ο AI Μετρ είδε ότι ψάχνεις για «${requestedAreaName}». Επειδή δεν υπάρχει διαθέσιμο τραπέζι εκεί αυτή τη στιγμή, σου βρήκε τις καλύτερες εναλλακτικές προσφορές (π.χ. στο ${bestVenueName} έως -50%)!`
+        `✨ Ο AI Μετρ είδε ότι ψάχνεις για «${requestedAreaName}». Επειδή δεν υπάρχει διαθέσιμο τραπέζι εκεί αυτή τη στιγμή, σου βρήκε τις καλύτερες εναλλακτικές προσφορές (π.χ. στο ${bestVenueName})!`
       );
     } else if (notes.length > 0) {
       setAiResponse(
@@ -321,159 +576,29 @@ export default function Home() {
     setAiPrompt("");
     setAiResponse(null);
     setSelectedArea("all");
-    setActiveVibes([]);
+    setSelectedVibes([]);
     setMinDiscount(0);
   };
 
-  // 4. B2B Verification Logic
-  const handleB2bVerify = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (b2bEmail.endsWith(".gr") || b2bEmail.endsWith(".com")) {
-      setIsB2bVerified(true);
-      setShowB2bModal(false);
-    } else {
-      alert("Παρακαλούμε εισάγετε ένα έγκυρο εταιρικό ή ακαδημαϊκό email.");
-    }
-  };
+  const fullVenues: VenueWithSlots[] = useMemo(() => {
+    const now = new Date();
+    const oneHourLater = new Date(now.getTime() + 60 * 60 * 1000);
+    const formatTime = (d: Date) =>
+      `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const panicWindow = `${formatTime(now)} - ${formatTime(oneHourLater)}`;
 
-  // 5. Squad Lock Logic (15')
-  const handleSquadLock = (slotId: string, venueName: string) => {
-    if (lockedSlots[slotId]) return;
-    setLockingSlotId(slotId);
-    setLockedSlots((prev) => ({ ...prev, [slotId]: 900 }));
+    return venueList.map((v, idx) => {
+      const matchedSlots = [
+        ...slotList.filter((s) => s.venueName === v.name || s.venueId === v.id),
+      ];
 
-    timerRefs.current[slotId] = setInterval(() => {
-      setLockedSlots((prev) => {
-        const current = prev[slotId];
-        if (current <= 1) {
-          clearInterval(timerRefs.current[slotId]);
-          const newState = { ...prev };
-          delete newState[slotId];
-          return newState;
-        }
-        return { ...prev, [slotId]: current - 1 };
-      });
-    }, 1000);
-
-    const shareText = `Έκλεισα προσωρινά τραπέζι στο ${venueName} για τα επόμενα 15 λεπτά μέσω HappySeats! Μπες να επιβεβαιώσεις για να το κρατήσουμε.`;
-    if (navigator.share) {
-      navigator
-        .share({
-          title: "HappySeats Κράτηση Παρέας",
-          text: shareText,
-          url: window.location.href,
-        })
-        .catch(console.error);
-    } else {
-      navigator.clipboard.writeText(shareText);
-      alert(`Αντιγράφηκε στο πρόχειρο:\n\n${shareText}`);
-    }
-
-    setTimeout(() => setLockingSlotId(null), 600);
-  };
-
-  // 6. Ολοκλήρωση Κράτησης (Αποθήκευση στο Firebase)
-  const handleConfirmBooking = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!bookingSlot) return;
-    setIsSubmittingBooking(true);
-
-    try {
-      const randomCode = `HS-${Math.floor(1000 + Math.random() * 9000)}`;
-      const todayStr = new Date().toLocaleDateString("el-GR");
-
-      await addDoc(collection(db, "bookings"), {
-        ticketCode: randomCode,
-        venueName: bookingSlot.venueName,
-        timeWindow: bookingSlot.timeWindow,
-        discount: bookingSlot.discount,
-        partySize: Number(partySize),
-        orderMode,
-        date: todayStr,
-        status: "confirmed",
-        userId: currentUser?.uid || "guest",
-        userEmail: currentUser?.email || "guest@happyseats.gr",
-        createdAt: serverTimestamp(),
-      });
-
-      // Αν είναι κανονικό slot στη βάση, μειώνουμε τα διαθέσιμα τραπέζια κατά 1
-      if (
-        !bookingSlot.id.startsWith("bounty-") &&
-        !bookingSlot.id.startsWith("rain-") &&
-        !bookingSlot.id.startsWith("panic-") &&
-        bookingSlot.availableTables > 0
-      ) {
-        await updateDoc(doc(db, "slots", bookingSlot.id), {
-          availableTables: Math.max(0, bookingSlot.availableTables - 1),
-        });
-      }
-
-      setBookedTicketCode(randomCode);
-    } catch (err) {
-      console.error("Σφάλμα κράτησης:", err);
-      alert("Παρουσιάστηκε σφάλμα κατά την κράτηση.");
-    } finally {
-      setIsSubmittingBooking(false);
-    }
-  };
-
-  const formatTime = (seconds: number) => {
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return `${m}:${s.toString().padStart(2, "0")}`;
-  };
-
-  // 7. Φιλτράρισμα Μαγαζιών
-  const filteredVenues = useMemo(() => {
-    return venues.filter((v) => {
-      const areaMatch = selectedArea === "all" || v.area === selectedArea;
-      const vibeMatch =
-        activeVibes.length === 0 ||
-        activeVibes.every((tag) => (v.vibeTags || []).includes(tag));
-      return areaMatch && vibeMatch;
-    });
-  }, [venues, selectedArea, activeVibes]);
-
-  // Εμπλουτισμός των Venues με bestDiscount & συντεταγμένες για να ΜΗΝ γράφει "undefined" ο χάρτης!
-  const mapVenues = useMemo(() => {
-    return filteredVenues.map((v, index) => {
-      const venueSlots = slots.filter((s) => s.venueName === v.name);
-      let maxDisc = 30;
-      venueSlots.forEach((s) => {
-        const num = parseInt(s.discount.replace("-", "").replace("%", ""), 10);
-        if (!isNaN(num) && num > maxDisc) maxDisc = num;
-      });
-      if (v.bountyActive || (demoBountyActive && index === 0)) {
-        maxDisc = Math.max(maxDisc, 40);
-      }
-
-      const bestDiscountStr = `-${maxDisc}%`;
-
-      return {
-        ...v,
-        name: v.name || "Κατάστημα",
-        category: v.category || "All Day Cafe & Bar",
-        area: v.area || "Αθήνα",
-        lat: v.lat || 37.9755 + index * 0.006,
-        lng: v.lng || 23.7348 + index * 0.006,
-        bestDiscount: bestDiscountStr,
-        discount: bestDiscountStr,
-      };
-    });
-  }, [filteredVenues, slots, demoBountyActive]);
-
-  // 8. Δημιουργία Λίστας Προσφορών (Κανονικά Slots + #7 Bounties + #5 Weather Deals + Flash Deals)
-  const displaySlots = useMemo(() => {
-    let result: SlotDeal[] = [...slots];
-
-    filteredVenues.forEach((v, idx) => {
-      // #7 No-Show Bounty (από το Firebase του καταστηματάρχη Ή από το Live Demo toggle)
+      // #7 No-Show Bounty Slot
       if (v.bountyActive || (demoBountyActive && idx === 0)) {
-        result.unshift({
+        matchedSlots.unshift({
           id: `bounty-${v.id}`,
           venueId: v.id,
           venueName: v.name,
-          timeWindow: `Άφιξη σε ${formatTime(bountyCountdown)} (Bounty)`,
+          timeWindow: `Άφιξη σε ${formatBountyTime(bountyCountdown)} (Bounty)`,
           discount: "-40%",
           availableTables: 1,
           totalTables: 1,
@@ -482,9 +607,23 @@ export default function Home() {
         });
       }
 
-      // #5 Weather-Triggered Deal (όταν βρέχει ή το έχει ενεργοποιήσει το μαγαζί)
+      // Flash / Panic Deal Slot
+      if (v.panicDealActive) {
+        matchedSlots.unshift({
+          id: `panic-${v.id}`,
+          venueId: v.id,
+          venueName: v.name,
+          timeWindow: panicWindow,
+          discount: v.panicDealText || "-30% Flash Fill-the-Table",
+          availableTables: 3,
+          totalTables: 3,
+          isPanicSlot: true,
+        });
+      }
+
+      // #5 Weather-Triggered Deal Slot
       if (v.rainAutoDeal || rainModeActive) {
-        result.push({
+        matchedSlots.push({
           id: `rain-${v.id}`,
           venueId: v.id,
           venueName: v.name,
@@ -497,123 +636,536 @@ export default function Home() {
         });
       }
 
-      // Flash / Panic Deal
-      if (v.panicDealActive) {
-        result.unshift({
-          id: `panic-${v.id}`,
+      // Micro-Zone Pass Slot
+      if (verifiedPass && v.microZoneType === verifiedPass.type) {
+        matchedSlots.push({
+          id: `microzone-${v.id}`,
           venueId: v.id,
           venueName: v.name,
-          timeWindow: "Επόμενα 30'",
-          discount: "-30%",
-          availableTables: 3,
-          totalTables: 3,
+          timeWindow:
+            verifiedPass.type === "office" ? "13:00 - 16:00" : "12:00 - 20:00",
+          discount:
+            verifiedPass.type === "office"
+              ? "-35% Office Lunch Break (Fast Take-away / Τραπέζι)"
+              : "-40% Αποκλειστικό Φοιτητικό Deal",
+          availableTables: 4,
+          totalTables: 4,
+          microZoneOnly: verifiedPass.type,
         });
       }
+
+      return {
+        ...v,
+        slots: matchedSlots,
+      };
+    });
+  }, [venueList, slotList, verifiedPass, demoBountyActive, bountyCountdown, rainModeActive]);
+
+  const availableAreas = useMemo(() => {
+    const areas = new Set<string>();
+    venueList.forEach((v) => {
+      if (v.area) areas.add(v.area);
+    });
+    return Array.from(areas);
+  }, [venueList]);
+
+  const extractDiscountNumber = (discountStr: string): number => {
+    const match = discountStr.match(/\d+/);
+    return match ? parseInt(match[0], 10) : 0;
+  };
+
+  const filteredVenues = useMemo(() => {
+    return fullVenues
+      .map((venue) => {
+        const matchedSlots = venue.slots.filter((slot) => {
+          if (minDiscount === 0) return true;
+          return extractDiscountNumber(slot.discount) >= minDiscount;
+        });
+
+        return {
+          ...venue,
+          slots: matchedSlots,
+        };
+      })
+      .filter((venue) => {
+        const matchesSearch =
+          venue.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          venue.category.toLowerCase().includes(searchTerm.toLowerCase());
+
+        const matchesArea =
+          selectedArea === "all" ||
+          venue.area.toLowerCase() === selectedArea.toLowerCase();
+
+        const matchesDiscount = minDiscount === 0 || venue.slots.length > 0;
+        const matchesVibes =
+          selectedVibes.length === 0 ||
+          selectedVibes.every((tag) => venue.vibeTags.includes(tag));
+
+        const matchesPanic = !onlyPanicDeals || venue.panicDealActive;
+        const matchesTakeaway = !onlyTakeaway || venue.takeawayReady;
+
+        return (
+          matchesSearch &&
+          matchesArea &&
+          matchesDiscount &&
+          matchesVibes &&
+          matchesPanic &&
+          matchesTakeaway
+        );
+      });
+  }, [
+    fullVenues,
+    searchTerm,
+    selectedArea,
+    minDiscount,
+    selectedVibes,
+    onlyPanicDeals,
+    onlyTakeaway,
+  ]);
+
+  // Υπολογισμός της μεγαλύτερης έκπτωσης (bestDiscount) για κάθε πινέζα στον χάρτη
+  const mapVenuesData = useMemo(() => {
+    return filteredVenues.map((v) => {
+      let maxDisc = 20;
+      v.slots.forEach((s) => {
+        const num = extractDiscountNumber(s.discount);
+        if (!isNaN(num) && num > maxDisc) maxDisc = num;
+      });
+      const bestDiscount = `-${maxDisc}%`;
+
+      return {
+        name: v.name,
+        category: v.category,
+        area: v.area,
+        address: v.address || v.area,
+        lat: v.lat,
+        lng: v.lng,
+        bestDiscount,
+        tableStatus: v.tableStatus,
+        takeawayReady: v.takeawayReady,
+        panicDealActive: v.panicDealActive,
+        panicDealText: v.panicDealText,
+        vibeTags: v.vibeTags,
+        microZoneType: v.microZoneType,
+      };
+    });
+  }, [filteredVenues]);
+
+  const toggleVibeFilter = (tag: string) => {
+    setSelectedVibes((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
+    );
+  };
+
+  const handleSquadLock = async (
+    venue: VenueWithSlots,
+    currentTimestamp: number
+  ) => {
+    const expiresAt = currentTimestamp + 15 * 60 * 1000;
+    setSquadHold({
+      venueName: venue.name,
+      expiresAt,
+      friendsJoined: 1,
     });
 
-    if (minDiscount > 0) {
-      result = result.filter((s) => {
-        const d = parseInt(s.discount.replace("-", "").replace("%", ""), 10);
-        return d >= minDiscount;
-      });
+    const bestDeal = venue.slots[0]?.discount || "-20%";
+    const shareText = `🍻 Κλείδωσα τραπέζι για 15 λεπτά στο "${venue.name}" (${venue.area}) με ${bestDeal}! Πατήστε για να επιβεβαιώσουμε την παρέα:`;
+    const shareUrl = `${window.location.origin}/?squad=${encodeURIComponent(venue.slug)}`;
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: `HappySeats Παρέα - ${venue.name}`,
+          text: shareText,
+          url: shareUrl,
+        });
+      } catch {
+        // ignore
+      }
+    } else if (navigator.clipboard) {
+      await navigator.clipboard.writeText(`${shareText} ${shareUrl}`);
+      alert("⏳ Το τραπέζι κλειδώθηκε για 15 λεπτά! Το link αντιγράφηκε.");
+    }
+  };
+
+  const handleVerifyPass = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = passEmailInput.trim().toLowerCase();
+    if (!clean.includes("@")) {
+      alert("Παρακαλώ εισάγετε ένα έγκυρο email.");
+      return;
     }
 
-    const validVenueNames = filteredVenues.map((v) => v.name);
-    result = result.filter((s) => validVenueNames.includes(s.venueName));
+    const isStudent =
+      clean.endsWith(".edu.gr") ||
+      clean.includes("uni") ||
+      clean.includes("student") ||
+      clean.endsWith(".gr");
 
-    return result;
-  }, [slots, filteredVenues, minDiscount, rainModeActive, demoBountyActive, bountyCountdown]);
+    const passType: "student" | "office" = isStudent ? "student" : "office";
+    const newPass = { type: passType, email: clean };
+    setVerifiedPass(newPass);
+    localStorage.setItem("happyseats_microzone_pass", JSON.stringify(newPass));
+    setShowPassModal(false);
+    setPassEmailInput("");
+  };
+
+  const handleShareCurrentBooking = async () => {
+    if (!currentBooking) return;
+    const shareText = `🍽️ Έκλεισα τραπέζι στο "${currentBooking.venueName}" μέσω HappySeats!\n📅 Ημερομηνία: ${currentBooking.date}\n⏰ Ώρα: ${currentBooking.timeWindow}\n👥 Άτομα: ${currentBooking.partySize}\n🎁 Έκπτωση: ${currentBooking.discount}\n🎟️ Κωδικός Κράτησης: ${currentBooking.ticketCode}\n\nΡαντεβού εκεί!`;
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: `Κράτηση HappySeats - ${currentBooking.venueName}`,
+          text: shareText,
+        });
+      } catch (err) {
+        console.log("Share cancelled:", err);
+      }
+    } else if (navigator.clipboard) {
+      await navigator.clipboard.writeText(shareText);
+      alert("Τα στοιχεία της κράτησης αντιγράφηκαν!");
+    }
+  };
+
+  const handleBooking = async () => {
+    if (!selectedVenue || !selectedSlot) return;
+
+    if (!currentUser) {
+      alert("Για να εκδώσετε e-ticket με έκπτωση, πρέπει πρώτα να συνδεθείτε.");
+      router.push("/login");
+      return;
+    }
+
+    if (selectedSlot.availableTables <= 0) {
+      alert("Δυστυχώς εξαντλήθηκαν τα τραπέζια!");
+      return;
+    }
+
+    setIsSubmitting(true);
+    const cleanPrefix = selectedVenue.name.substring(0, 3).toUpperCase();
+    const code = `${cleanPrefix}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const todayDate = new Date().toLocaleDateString("el-GR");
+
+    try {
+      const qExisting = query(
+        collection(db, "bookings"),
+        where("customerId", "==", currentUser.uid),
+        where("date", "==", todayDate)
+      );
+      const snapExisting = await getDocs(qExisting);
+      const userTodayBookings = snapExisting.docs.map((d) => d.data());
+
+      const activeTodayCount = userTodayBookings.filter(
+        (b) => b.status === "confirmed"
+      ).length;
+      if (activeTodayCount >= 2) {
+        alert(
+          "Έχετε φτάσει το μέγιστο όριο (2 ενεργά tickets ανά ημέρα). Εξαργυρώστε ή ακυρώστε μία κράτηση για να συνεχίσετε."
+        );
+        setIsSubmitting(false);
+        return;
+      }
+
+      const hasConflict = userTodayBookings.some(
+        (b) =>
+          b.status === "confirmed" && b.timeWindow === selectedSlot.timeWindow
+      );
+      if (hasConflict) {
+        alert(
+          `Έχετε ήδη κράτηση για τη χρονοθυρίδα "${selectedSlot.timeWindow}".`
+        );
+        setIsSubmitting(false);
+        return;
+      }
+    } catch (checkErr) {
+      console.warn("Booking verification check warning:", checkErr);
+    }
+
+    const newBooking: Booking = {
+      ticketCode: code,
+      venueName: selectedVenue.name,
+      timeWindow: selectedSlot.timeWindow,
+      discount: selectedSlot.discount,
+      partySize,
+      date: todayDate,
+      orderMode,
+    };
+
+    try {
+      const bookingsCollectionRef = collection(db, "bookings");
+      const newBookingRef = doc(bookingsCollectionRef);
+
+      const isVirtualSlot =
+        selectedSlot.id.startsWith("panic-") ||
+        selectedSlot.id.startsWith("microzone-") ||
+        selectedSlot.id.startsWith("bounty-") ||
+        selectedSlot.id.startsWith("rain-");
+
+      if (isVirtualSlot) {
+        await runTransaction(db, async (transaction) => {
+          transaction.set(newBookingRef, {
+            ...newBooking,
+            venueId: selectedVenue.id,
+            slotId: selectedSlot.id,
+            status: "confirmed",
+            customerId: currentUser.uid,
+            customerEmail: currentUser.email,
+            customerName: currentUser.displayName || currentUser.email || "Πελάτης",
+            createdAt: serverTimestamp(),
+          });
+        });
+      } else {
+        const slotRef = doc(db, "slots", selectedSlot.id);
+        await runTransaction(db, async (transaction) => {
+          const slotSnap = await transaction.get(slotRef);
+          if (!slotSnap.exists()) throw new Error("Το slot δεν υπάρχει πλέον!");
+
+          const currentTables = slotSnap.data().availableTables ?? 0;
+          if (currentTables <= 0) throw new Error("Εξαντλήθηκαν τα τραπέζια!");
+
+          transaction.update(slotRef, {
+            availableTables: currentTables - 1,
+          });
+
+          transaction.set(newBookingRef, {
+            ...newBooking,
+            venueId: selectedVenue.id,
+            slotId: selectedSlot.id,
+            status: "confirmed",
+            customerId: currentUser.uid,
+            customerEmail: currentUser.email,
+            customerName: currentUser.displayName || currentUser.email || "Πελάτης",
+            createdAt: serverTimestamp(),
+          });
+        });
+      }
+
+      const stored = localStorage.getItem("happyseats_tickets");
+      const existingCodes = stored ? JSON.parse(stored) : [];
+      if (!existingCodes.includes(code)) {
+        localStorage.setItem(
+          "happyseats_tickets",
+          JSON.stringify([code, ...existingCodes])
+        );
+      }
+
+      setCurrentBooking(newBooking);
+      setSelectedSlot(null);
+      setSquadHold(null);
+    } catch (error) {
+      console.error(error);
+      const msg = error instanceof Error ? error.message : "Σφάλμα κράτησης.";
+      alert(msg);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-surface text-text-main font-sans transition-colors duration-200">
-      {/* HEADER */}
-      <header className="sticky top-0 z-40 bg-surface/90 backdrop-blur-md border-b border-border-theme px-4 sm:px-6 py-4">
-        <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-4">
-          <div className="flex flex-col">
-            <h1 className="text-3xl font-black tracking-tight text-brand-text flex items-center gap-2">
-              <span className="text-brand">Happy</span>Seats
-            </h1>
-            <p className="text-[10px] sm:text-xs font-semibold text-text-muted mt-0.5 max-w-xs">
-              Κλείσε τραπέζι ή παραλαβή τις σωστές ώρες, κέρδισε έκπτωση.
-            </p>
-          </div>
+    <div className="min-h-screen bg-surface text-text-main p-6 transition-colors duration-200">
+      <header className="max-w-5xl mx-auto flex flex-wrap items-center justify-between gap-3 pb-6 border-b border-border-theme">
+        <div>
+          <h1 className="text-2xl font-black text-brand tracking-tight">HappySeats</h1>
+          <p className="text-xs text-text-muted">
+            Κλείσε τραπέζι ή παραλαβή τις σωστές ώρες, κέρδισε έκπτωση
+          </p>
+        </div>
 
-          <div className="flex items-center gap-2.5">
-            {/* Dark/Light Mode Toggle */}
-            <button
-              onClick={toggleDarkMode}
-              className="p-2.5 rounded-xl bg-card border border-border-theme text-text-main hover:bg-subtle transition cursor-pointer shadow-sm flex items-center justify-center"
-              aria-label="Toggle Dark Mode"
-              title="Εναλλαγή Dark / Light Mode"
-            >
-              {isDarkMode ? "🌞" : "🌙"}
-            </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Dark/Light Mode Toggle */}
+          <button
+            type="button"
+            onClick={toggleDarkMode}
+            className="p-2 rounded-xl bg-card border border-border-theme text-text-main hover:bg-subtle transition cursor-pointer shadow-sm flex items-center justify-center"
+            aria-label="Toggle Dark Mode"
+            title="Εναλλαγή Dark / Light Mode"
+          >
+            {isDarkMode ? "🌞" : "🌙"}
+          </button>
 
-            {!isB2bVerified ? (
-              <button
-                onClick={() => setShowB2bModal(true)}
-                className="hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-bold hover:bg-indigo-100 transition cursor-pointer"
-              >
-                <span>💼</span> Office/Student Pass
-              </button>
-            ) : (
-              <span className="hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-bold">
-                <span>✓</span> Pass Ενεργό
-              </span>
-            )}
-
-            {currentUser ? (
+          <button
+            onClick={() => setShowPassModal(true)}
+            className={`text-xs font-bold px-3 py-2 rounded-xl transition border flex items-center gap-1.5 cursor-pointer ${
+              verifiedPass
+                ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                : "bg-card hover:bg-subtle text-text-main border-border-theme shadow-sm"
+            }`}
+          >
+            {verifiedPass ? (
               <>
-                <div className="hidden sm:flex items-center gap-1 px-3 py-2 bg-brand/10 rounded-xl border border-brand/20">
-                  <span className="text-xs font-bold text-brand-text">VIP Streak:</span>
-                  <div className="flex gap-0.5">
-                    {[1, 2, 3].map((i) => (
-                      <span
-                        key={i}
-                        className={`text-sm ${
-                          i <= userStreak ? "opacity-100" : "opacity-30 grayscale"
-                        }`}
-                      >
-                        ☕
-                      </span>
-                    ))}
-                  </div>
+                <span>{verifiedPass.type === "student" ? "🎓" : "💼"}</span>
+                <span>
+                  {verifiedPass.type === "student"
+                    ? "Φοιτητικό Πάσο Ενεργό"
+                    : "Office Pass Ενεργό"}
+                </span>
+              </>
+            ) : (
+              <>
+                <span>🎓/💼</span>
+                <span>Πάσο / Office Break</span>
+              </>
+            )}
+          </button>
+
+          <Link
+            href="/my-tickets"
+            className="text-xs font-semibold px-3 py-2 bg-card hover:bg-subtle text-text-main rounded-xl transition border border-border-theme shadow-sm flex items-center gap-1"
+          >
+            🎟️ Τα Εισιτήριά μου
+          </Link>
+
+          {currentUser ? (
+            <div className="flex items-center gap-2">
+              <div className="hidden sm:flex items-center gap-1 px-2.5 py-1.5 bg-brand/10 rounded-xl border border-brand/20">
+                <span className="text-[11px] font-bold text-brand-text">VIP Streak:</span>
+                <div className="flex gap-0.5">
+                  {[1, 2, 3].map((i) => (
+                    <span
+                      key={i}
+                      className={`text-xs ${
+                        i <= userStreak ? "opacity-100" : "opacity-30 grayscale"
+                      }`}
+                    >
+                      ☕
+                    </span>
+                  ))}
                 </div>
-                <Link
-                  href="/my-tickets"
-                  className="px-4 py-2 bg-brand hover:bg-brand-hover text-white text-xs sm:text-sm font-bold rounded-xl transition shadow-sm cursor-pointer"
-                >
-                  🎟️ Τα Εισιτήριά μου
-                </Link>
-                <button
-                  onClick={() => signOut(auth)}
-                  className="px-3 py-2 text-text-muted hover:text-text-main text-xs font-semibold cursor-pointer"
-                >
-                  Έξοδος
-                </button>
-              </>
-            ) : (
-              <>
-                <Link
-                  href="/login"
-                  className="px-4 py-2 bg-brand hover:bg-brand-hover text-white text-xs sm:text-sm font-bold rounded-xl transition shadow-sm cursor-pointer"
-                >
-                  Σύνδεση
-                </Link>
-                <Link
-                  href="/merchant/login"
-                  className="px-3 py-2 text-text-muted hover:text-text-main text-xs font-semibold cursor-pointer"
-                >
-                  Συνεργάτες Εστίασης →
-                </Link>
-              </>
+              </div>
+              <span className="text-xs text-text-muted hidden sm:inline font-medium">
+                👤 {currentUser.displayName || currentUser.email?.split("@")[0]}
+              </span>
+              <button
+                onClick={() => signOut(auth)}
+                className="text-xs px-2.5 py-2 bg-card hover:bg-subtle text-text-muted hover:text-red-600 rounded-xl transition border border-border-theme shadow-sm cursor-pointer"
+              >
+                Έξοδος
+              </button>
+            </div>
+          ) : (
+            <Link
+              href="/login"
+              className="text-xs font-bold px-3 py-2 bg-brand hover:bg-brand-hover text-white rounded-xl transition shadow-sm"
+            >
+              Σύνδεση
+            </Link>
+          )}
+
+          <Link
+            href="/merchant/login"
+            className="text-xs font-semibold px-3 py-2 bg-card hover:bg-brand-light text-brand-text rounded-xl transition border border-border-theme shadow-sm hidden md:inline-block"
+          >
+            Συνεργάτες Εστίασης →
+          </Link>
+
+          {currentUser?.email &&
+            ["skampanar@gmail.com", "olga_dre@yahoo.gr", "tommyanastaso@gmail.com"].includes(
+              currentUser.email.toLowerCase().trim()
+            ) && (
+              <Link
+                href="/admin"
+                className="text-xs font-bold px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl transition shadow-sm flex items-center gap-1"
+              >
+                🛡️ Admin Panel
+              </Link>
             )}
-          </div>
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-        {/* #5, #6, #7 LIVE SMART RADAR BAR (Καιρός, Miss You Campaign & No-Show Bounty) */}
+      <main className="max-w-5xl mx-auto py-8 space-y-6">
+        {squadHold && (
+          <div className="p-4 bg-gradient-to-r from-brand-light via-card to-card border border-brand-border rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-sm">
+            <div className="flex items-center gap-3">
+              <span className="text-2xl">🤝</span>
+              <div>
+                <div className="text-xs font-bold text-brand-text uppercase tracking-wider">
+                  Κρατημενο για την παρεα ({Math.floor(squadSecondsLeft / 60)}:
+                  {String(squadSecondsLeft % 60).padStart(2, "0")})
+                </div>
+                <p className="text-sm font-bold text-text-main">
+                  {squadHold.venueName} —{" "}
+                  <span className="text-emerald-600">
+                    {squadHold.friendsJoined}/3 φίλοι επιβεβαίωσαν
+                  </span>
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() =>
+                  setSquadHold((prev) =>
+                    prev
+                      ? { ...prev, friendsJoined: prev.friendsJoined + 1 }
+                      : null
+                  )
+                }
+                className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl transition cursor-pointer shadow-sm"
+              >
+                + Επιβεβαίωση Φίλου (Demo)
+              </button>
+              <button
+                onClick={() => setSquadHold(null)}
+                className="px-2.5 py-1.5 bg-subtle hover:bg-border-theme text-text-muted text-xs rounded-xl transition cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        )}
+
+        {currentBooking && (
+          <div className="p-6 bg-card border-2 border-brand rounded-3xl flex flex-col md:flex-row items-center justify-between gap-6 shadow-md">
+            <div className="space-y-2">
+              <span className="text-xs uppercase tracking-widest px-3 py-1 bg-brand-light text-brand-text rounded-full font-bold border border-brand-border">
+                ✓ e-Ticket Έτοιμο & Αποθηκευμένο
+              </span>
+              <h2 className="text-2xl font-bold text-text-main">
+                {currentBooking.venueName}
+              </h2>
+              <p className="text-text-muted text-sm">
+                Ώρα:{" "}
+                <span className="font-semibold text-text-main">
+                  {currentBooking.timeWindow}
+                </span>{" "}
+                | Ημερομηνία: {currentBooking.date}
+              </p>
+              <p className="text-text-muted text-sm">
+                Τύπος:{" "}
+                <span className="font-semibold text-text-main">
+                  {currentBooking.orderMode === "takeaway"
+                    ? "🛍️ Παραλαβή Take-away"
+                    : `🍽️ Τραπέζι (${currentBooking.partySize} άτομα)`}
+                </span>{" "}
+                | Προσφορά:{" "}
+                <span className="text-brand-text font-bold">
+                  {currentBooking.discount}
+                </span>
+              </p>
+              <div className="pt-2">
+                <button
+                  onClick={handleShareCurrentBooking}
+                  className="px-4 py-2 bg-subtle hover:bg-border-theme text-text-main border border-border-theme rounded-xl text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+                >
+                  <span>📲</span> Κοινοποίηση στην παρέα
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-subtle border border-border-theme p-4 rounded-2xl flex flex-col items-center">
+              <QRCodeSVG
+                value={`HAPPYSEATS:${currentBooking.ticketCode}|${currentBooking.venueName}|${currentBooking.partySize}P`}
+                size={140}
+              />
+              <span className="text-text-main font-mono font-bold text-sm mt-2">
+                {currentBooking.ticketCode}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* #5, #6, #7 LIVE SMART RADAR BAR */}
         <section className="bg-card border border-border-theme rounded-3xl p-4 shadow-sm flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-sky-500/15 border border-sky-400/30 flex items-center justify-center text-xl shrink-0">
@@ -690,7 +1242,8 @@ export default function Home() {
                   </h3>
                 </div>
                 <p className="text-xs text-text-muted mt-0.5">
-                  Κλείσε τραπέζι σήμερα σε οποιοδήποτε συνεργαζόμενο κατάστημα και <strong>ο 1ος καφές ή το γλυκό είναι κερασμένα από εμάς!</strong>
+                  Κλείσε τραπέζι σήμερα σε οποιοδήποτε συνεργαζόμενο κατάστημα και{" "}
+                  <strong>ο 1ος καφές ή το γλυκό είναι κερασμένα από εμάς!</strong>
                 </p>
               </div>
             </div>
@@ -764,33 +1317,48 @@ export default function Home() {
           )}
         </section>
 
-        {/* FILTERS */}
-        <section className="bg-card border border-border-theme p-4 sm:p-6 rounded-3xl shadow-sm space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <label className="text-[11px] font-bold text-text-muted uppercase tracking-wider pl-1">
-                Πού ψάχνεις;
+        {/* Μπάρα Αναζήτησης και Φίλτρων */}
+        <section className="bg-card border border-border-theme p-5 rounded-3xl shadow-sm space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-1">
+                Αναζήτηση
+              </label>
+              <input
+                type="text"
+                placeholder="Όνομα μαγαζιού ή κουζίνα..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand placeholder:text-text-muted"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-1">
+                Περιοχή
               </label>
               <select
                 value={selectedArea}
                 onChange={(e) => setSelectedArea(e.target.value)}
-                className="w-full bg-subtle border border-border-theme text-text-main font-bold text-sm rounded-xl px-4 py-3 focus:outline-none focus:border-brand cursor-pointer shadow-inner"
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand cursor-pointer"
               >
-                {AREAS.map((a) => (
-                  <option key={a} value={a === "Όλες οι περιοχές" ? "all" : a}>
-                    📍 {a}
+                <option value="all">Όλες οι περιοχές</option>
+                {availableAreas.map((area) => (
+                  <option key={area} value={area}>
+                    {area}
                   </option>
                 ))}
               </select>
             </div>
-            <div className="space-y-1">
-              <label className="text-[11px] font-bold text-text-muted uppercase tracking-wider pl-1">
-                Ελάχιστη Έκπτωση
+
+            <div>
+              <label className="block text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-1">
+                Έκπτωση
               </label>
               <select
                 value={minDiscount}
                 onChange={(e) => setMinDiscount(Number(e.target.value))}
-                className="w-full bg-subtle border border-border-theme text-text-main font-bold text-sm rounded-xl px-4 py-3 focus:outline-none focus:border-brand cursor-pointer shadow-inner"
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand cursor-pointer"
               >
                 <option value={0}>Όλες οι εκπτώσεις</option>
                 <option value={20}>Τουλάχιστον -20%</option>
@@ -801,233 +1369,309 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="pt-2 border-t border-border-theme">
-            <label className="text-[11px] font-bold text-text-muted uppercase tracking-wider pl-1 block mb-2">
-              Τι φάση ψάχνεις τώρα; (Live Vibes)
-            </label>
-            <div className="flex flex-wrap gap-2">
-              {VIBE_OPTIONS.map((vibe) => (
+          <div className="pt-2 border-t border-border-theme space-y-2">
+            <div className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">
+              Live Vibe & Διαθεσιμοτητα Τωρα
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => setOnlyPanicDeals((prev) => !prev)}
+                className={`text-xs px-3 py-1.5 rounded-full font-bold border transition cursor-pointer ${
+                  onlyPanicDeals
+                    ? "bg-red-600 text-white border-red-600 shadow-sm"
+                    : "bg-card text-red-600 border-red-200 hover:border-red-400"
+                }`}
+              >
+                🔥 Flash Τραπέζια (-30% Τώρα)
+              </button>
+
+              <button
+                onClick={() => setOnlyTakeaway((prev) => !prev)}
+                className={`text-xs px-3 py-1.5 rounded-full font-semibold border transition cursor-pointer ${
+                  onlyTakeaway
+                    ? "bg-emerald-500 text-white border-emerald-500 shadow-sm"
+                    : "bg-card text-text-main border-border-theme hover:border-text-muted"
+                }`}
+              >
+                🛍️ Άμεσο Take-away
+              </button>
+
+              {VIBE_OPTIONS.map((tag) => {
+                const isSelected = selectedVibes.includes(tag);
+                return (
+                  <button
+                    key={tag}
+                    onClick={() => toggleVibeFilter(tag)}
+                    className={`text-xs px-3 py-1.5 rounded-full font-semibold border transition cursor-pointer ${
+                      isSelected
+                        ? "bg-brand text-white border-brand shadow-sm"
+                        : "bg-card text-text-main border-border-theme hover:border-text-muted"
+                    }`}
+                  >
+                    {tag}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex justify-between items-center pt-2 border-t border-border-theme text-xs">
+            <span className="text-text-muted">
+              Βρέθηκαν{" "}
+              <strong className="text-brand-text font-bold">{filteredVenues.length}</strong>{" "}
+              καταστήματα
+            </span>
+            <div className="flex items-center gap-4">
+              <button
+                onClick={() => setShowMap((prev) => !prev)}
+                className="px-3.5 py-1.5 bg-brand-light hover:opacity-90 text-brand-text border border-brand-border rounded-xl font-bold transition flex items-center gap-1 cursor-pointer"
+              >
+                {showMap ? "📋 Προβολή Λίστας" : "🗺️ Προβολή Χάρτη"}
+              </button>
+              {(searchTerm ||
+                selectedArea !== "all" ||
+                minDiscount > 0 ||
+                selectedVibes.length > 0 ||
+                onlyPanicDeals ||
+                onlyTakeaway) && (
                 <button
-                  key={vibe}
-                  onClick={() =>
-                    setActiveVibes((prev) =>
-                      prev.includes(vibe)
-                        ? prev.filter((v) => v !== vibe)
-                        : [...prev, vibe]
-                    )
-                  }
-                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition border cursor-pointer ${
-                    activeVibes.includes(vibe)
-                      ? "bg-brand text-white border-brand shadow-sm"
-                      : "bg-subtle text-text-muted border-border-theme hover:bg-card"
-                  }`}
+                  onClick={() => {
+                    setSearchTerm("");
+                    setSelectedArea("all");
+                    setMinDiscount(0);
+                    setSelectedVibes([]);
+                    setOnlyPanicDeals(false);
+                    setOnlyTakeaway(false);
+                  }}
+                  className="text-text-muted hover:text-text-main transition underline cursor-pointer"
                 >
-                  {vibe}
+                  Καθαρισμός
                 </button>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        {/* MAP & LIST SPLIT */}
-        <section className="grid grid-cols-1 lg:grid-cols-5 gap-6 h-[620px]">
-          <div className="lg:col-span-2 bg-card border border-border-theme rounded-3xl shadow-sm overflow-hidden flex flex-col h-full">
-            <div className="p-4 border-b border-border-theme bg-subtle flex justify-between items-center shrink-0">
-              <h2 className="font-black text-text-main flex items-center gap-2">
-                <span>📍</span> Χάρτης & Live Vibe
-              </h2>
-            </div>
-            <div className="flex-1 bg-surface relative z-0">
-              <VenueMap venues={mapVenues} />
-            </div>
-          </div>
-
-          <div className="lg:col-span-3 bg-card border border-border-theme rounded-3xl shadow-sm overflow-hidden flex flex-col h-full">
-            <div className="p-4 border-b border-border-theme bg-subtle flex justify-between items-center shrink-0">
-              <h2 className="font-black text-text-main flex items-center gap-2">
-                <span>🔥</span> Διαθέσιμες Προσφορές, Weather Deals & Bounties
-              </h2>
-              <span className="text-xs bg-brand/10 text-brand-text px-3 py-1 rounded-full font-bold border border-brand/20">
-                Βρέθηκαν {displaySlots.length}
-              </span>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {displaySlots.length === 0 ? (
-                <div className="text-center py-12 text-sm text-text-muted italic h-full flex flex-col items-center justify-center">
-                  <span className="text-4xl mb-3">🧐</span>
-                  Δεν βρέθηκαν προσφορές με αυτά τα φίλτρα. Πατήστε «Όλες οι περιοχές» για να δείτε όλα τα διαθέσιμα καταστήματα.
-                </div>
-              ) : (
-                displaySlots.map((slot) => {
-                  const venue = venues.find((v) => v.name === slot.venueName);
-                  const isPanic = slot.id.startsWith("panic-");
-                  const isBounty = Boolean(slot.isBounty);
-                  const isRainDeal = Boolean(slot.isRainDeal);
-                  const isLocked = !!lockedSlots[slot.id];
-
-                  return (
-                    <div
-                      key={slot.id}
-                      className={`relative flex flex-col sm:flex-row items-center justify-between p-4 rounded-2xl border transition shadow-sm group ${
-                        isBounty
-                          ? "bg-amber-400/15 border-2 border-amber-500"
-                          : isPanic
-                            ? "bg-red-50/50 border-red-200"
-                            : isRainDeal
-                              ? "bg-sky-500/10 border-2 border-sky-400"
-                              : "bg-surface border-border-theme hover:border-brand"
-                      }`}
-                    >
-                      <div className="flex-1 w-full text-left">
-                        <div className="flex flex-wrap items-center gap-2 mb-1">
-                          <h3 className="text-base font-black text-text-main">
-                            {slot.venueName}
-                          </h3>
-                          {isBounty && (
-                            <span className="text-[10px] bg-amber-400 text-neutral-950 font-black px-2.5 py-0.5 rounded-md uppercase tracking-wider">
-                              🎯 #7 NO-SHOW BOUNTY ({formatTime(bountyCountdown)})
-                            </span>
-                          )}
-                          {isPanic && (
-                            <span className="text-[10px] bg-red-600 text-white font-black px-2 py-0.5 rounded-md animate-pulse uppercase tracking-widest">
-                              Flash Deal
-                            </span>
-                          )}
-                          {isRainDeal && (
-                            <span className="text-[10px] bg-sky-600 text-white font-black px-2.5 py-0.5 rounded-md uppercase tracking-wider">
-                              🌧️ #5 WEATHER AUTO-DEAL
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-text-muted mb-2">
-                          <span className="flex items-center gap-1">
-                            🕒 {slot.timeWindow}
-                          </span>
-                          <span className="flex items-center gap-1">
-                            🪑 {slot.availableTables} τραπέζια
-                          </span>
-                          {slot.bonusPerk && (
-                            <span className="text-brand-text font-bold">
-                              {slot.bonusPerk}
-                            </span>
-                          )}
-                        </div>
-
-                        {venue?.vibeTags && venue.vibeTags.length > 0 && (
-                          <div className="flex flex-wrap gap-1 mb-3">
-                            {venue.vibeTags.map((tag) => (
-                              <span
-                                key={tag}
-                                className="text-[10px] bg-subtle text-text-muted px-2 py-0.5 rounded border border-border-theme"
-                              >
-                                {tag}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-
-                        {isLocked && (
-                          <div className="text-[11px] text-amber-600 font-bold flex items-center gap-1 mb-2 bg-amber-50 inline-block px-2 py-1 rounded-md border border-amber-200">
-                            🔒 Κρατημένο για την παρέα: {formatTime(lockedSlots[slot.id])}
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="flex flex-col items-center gap-2 shrink-0 mt-4 sm:mt-0 sm:ml-4 border-t sm:border-t-0 sm:border-l border-border-theme pt-4 sm:pt-0 sm:pl-4 w-full sm:w-auto">
-                        <div
-                          className={`text-2xl font-black ${
-                            isBounty
-                              ? "text-amber-500"
-                              : isRainDeal
-                                ? "text-sky-500"
-                                : isPanic
-                                  ? "text-red-600"
-                                  : "text-brand-text"
-                          }`}
-                        >
-                          {slot.discount}
-                        </div>
-
-                        <div className="flex flex-col gap-2 w-full">
-                          <button
-                            disabled={isLocked}
-                            onClick={() => {
-                              setBookingSlot(slot);
-                              setBookedTicketCode(null);
-                            }}
-                            className={`w-full px-5 py-2.5 font-black text-xs rounded-xl transition shadow-sm cursor-pointer ${
-                              isLocked
-                                ? "bg-subtle text-text-muted cursor-not-allowed border border-border-theme"
-                                : isBounty
-                                  ? "bg-amber-400 hover:bg-amber-500 text-neutral-950"
-                                  : isRainDeal
-                                    ? "bg-sky-600 hover:bg-sky-700 text-white"
-                                    : isPanic
-                                      ? "bg-red-600 hover:bg-red-700 text-white"
-                                      : "bg-brand hover:bg-brand-hover text-white"
-                            }`}
-                          >
-                            {isLocked
-                              ? "Σε Κράτηση"
-                              : isBounty
-                                ? "🎯 Άρπαξε το Bounty"
-                                : "Κράτηση"}
-                          </button>
-
-                          {!isLocked && (
-                            <button
-                              onClick={() => handleSquadLock(slot.id, slot.venueName)}
-                              disabled={lockingSlotId === slot.id}
-                              className="w-full px-3 py-1.5 bg-card hover:bg-subtle text-text-main border border-border-theme text-[10px] font-bold rounded-lg transition cursor-pointer"
-                            >
-                              {lockingSlotId === slot.id ? "..." : "🤝 Κράτα το (15')"}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })
               )}
             </div>
           </div>
         </section>
+
+        {showMap && <VenueMap venues={mapVenuesData} />}
+
+        <h2 className="text-xl font-bold text-text-main">Διαθέσιμες Προσφορές Σήμερα</h2>
+
+        {loading ? (
+          <div className="text-center py-20 text-text-muted text-sm">
+            Φόρτωση προσφορών...
+          </div>
+        ) : filteredVenues.length === 0 ? (
+          <div className="bg-card border border-border-theme p-12 rounded-3xl text-center space-y-3 shadow-sm">
+            <span className="text-3xl">🍽️</span>
+            <h3 className="font-bold text-text-main text-base">
+              Δεν βρέθηκαν διαθέσιμες προσφορές
+            </h3>
+            <p className="text-xs text-text-muted max-w-sm mx-auto">
+              Αυτή τη στιγμή δεν υπάρχουν ενεργά happy hour τραπέζια για τα
+              κριτήρια που επιλέξατε.
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {filteredVenues.map((venue) => (
+              <div
+                key={venue.id}
+                onClick={() => router.push(`/venue/${venue.slug}`)}
+                className={`bg-card rounded-3xl overflow-hidden border shadow-sm hover:shadow-md transition cursor-pointer hover:border-brand ${
+                  venue.panicDealActive
+                    ? "border-red-400 ring-1 ring-red-400"
+                    : "border-border-theme"
+                }`}
+              >
+                <div className="relative w-full h-48">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={venue.image}
+                    alt={venue.name}
+                    loading="eager"
+                    decoding="async"
+                    className="w-full h-full object-cover"
+                  />
+
+                  {venue.panicDealActive && (
+                    <div className="absolute top-3 left-3 right-3 bg-red-600/95 backdrop-blur-sm text-white px-3 py-1.5 rounded-xl flex items-center justify-between text-xs font-black shadow-md animate-pulse">
+                      <span>🔥 FLASH FILL-THE-TABLE</span>
+                      <span>{venue.panicDealText}</span>
+                    </div>
+                  )}
+
+                  <div className="absolute bottom-3 left-3 flex flex-wrap items-center gap-1.5">
+                    {venue.tableStatus === "plenty" && (
+                      <span className="text-[11px] font-bold bg-card/95 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full shadow-sm backdrop-blur-sm">
+                        🟢 Άνετο για Παρέα
+                      </span>
+                    )}
+                    {venue.tableStatus === "few" && (
+                      <span className="text-[11px] font-bold bg-card/95 text-amber-700 border border-amber-200 px-2.5 py-1 rounded-full shadow-sm backdrop-blur-sm">
+                        🟠 1-3 Τραπέζια
+                      </span>
+                    )}
+                    {venue.tableStatus === "full" && (
+                      <span className="text-[11px] font-bold bg-card/95 text-red-700 border border-red-200 px-2.5 py-1 rounded-full shadow-sm backdrop-blur-sm">
+                        🔴 Πλήρες Τραπεζιών
+                      </span>
+                    )}
+
+                    {venue.takeawayReady && (
+                      <span className="text-[11px] font-bold bg-card/95 text-text-main border border-border-theme px-2.5 py-1 rounded-full shadow-sm backdrop-blur-sm">
+                        🛍️ Take-away Ready
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="p-6">
+                  <div className="flex justify-between items-start mb-1">
+                    <span className="hover:text-brand transition">
+                      <h3 className="text-lg font-bold text-text-main">
+                        {venue.name} →
+                      </h3>
+                    </span>
+                    <span className="text-xs bg-subtle text-text-main px-2.5 py-1 rounded-lg border border-border-theme font-medium">
+                      {venue.area}
+                    </span>
+                  </div>
+                  <p className="text-xs text-text-muted mb-3">
+                    {venue.category}
+                  </p>
+
+                  {venue.vibeTags.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-4">
+                      {venue.vibeTags.map((tag) => (
+                        <span
+                          key={tag}
+                          className="text-[11px] bg-subtle text-text-main border border-border-theme px-2.5 py-0.5 rounded-lg font-medium"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">
+                        Διαθέσιμες Χρονοθυρίδες
+                      </span>
+
+                      {venue.tableStatus !== "full" && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSquadLock(venue, Date.now());
+                          }}
+                          className="text-[11px] font-bold text-brand-text hover:opacity-80 flex items-center gap-1 cursor-pointer"
+                        >
+                          🤝 Κράτα το για την παρέα (15&apos;)
+                        </button>
+                      )}
+                    </div>
+
+                    {venue.slots.length === 0 ? (
+                      <p className="text-xs text-text-muted py-3 italic">
+                        Δεν υπάρχουν ενεργές χρονοθυρίδες αυτή τη στιγμή.
+                      </p>
+                    ) : (
+                      venue.slots.map((slot) => (
+                        <div
+                          key={slot.id}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <SlotItem
+                            slot={slot}
+                            onSelect={() => {
+                              setSelectedVenue(venue);
+                              setSelectedSlot(slot);
+                              setOrderMode(
+                                venue.tableStatus === "full"
+                                  ? "takeaway"
+                                  : "dine-in"
+                              );
+                            }}
+                          />
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </main>
 
-      {/* B2B MODAL */}
-      {showB2bModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-surface border border-border-theme rounded-3xl p-6 w-full max-w-sm shadow-xl">
-            <h3 className="text-lg font-black text-text-main mb-2">
-              Ξεκλείδωσε Secret Deals 💼
-            </h3>
-            <p className="text-xs text-text-muted mb-4">
-              Εισήγαγε το εταιρικό (.com/.gr) ή φοιτητικό σου email για να βλέπεις προσφορές για μεσημεριανά διαλείμματα και φοιτητικά στέκια.
+      {/* Modal Επαλήθευσης Πάσου */}
+      {showPassModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-card border border-border-theme p-6 rounded-3xl max-w-md w-full space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-lg text-text-main">
+                🎓 / 💼 Ξεκλείδωμα Micro-Zone Deals
+              </h3>
+              <button
+                onClick={() => setShowPassModal(false)}
+                className="text-text-muted hover:text-text-main text-sm cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-text-muted leading-relaxed">
+              Δήλωσε το ακαδημαϊκό σου email (π.χ. <code>.edu.gr</code>) ή εταιρικό email για{" "}
+              <strong>Office Lunch Break deals (13:00–16:00)</strong>.
             </p>
-            <form onSubmit={handleB2bVerify} className="space-y-3">
+
+            {verifiedPass && (
+              <div className="p-3 rounded-2xl bg-indigo-50 border border-indigo-200 flex items-center justify-between text-xs">
+                <div>
+                  <div className="font-bold text-indigo-700">
+                    Ενεργό:{" "}
+                    {verifiedPass.type === "student"
+                      ? "🎓 Φοιτητικό Πάσο"
+                      : "💼 Office Break Pass"}
+                  </div>
+                  <div className="text-text-muted">{verifiedPass.email}</div>
+                </div>
+                <button
+                  onClick={() => {
+                    setVerifiedPass(null);
+                    localStorage.removeItem("happyseats_microzone_pass");
+                  }}
+                  className="text-red-600 hover:underline font-semibold cursor-pointer"
+                >
+                  Αφαίρεση
+                </button>
+              </div>
+            )}
+
+            <form onSubmit={handleVerifyPass} className="space-y-3">
               <input
                 type="email"
                 required
-                placeholder="π.χ. name@company.gr"
-                value={b2bEmail}
-                onChange={(e) => setB2bEmail(e.target.value)}
-                className="w-full bg-card border border-border-theme text-text-main px-4 py-2.5 rounded-xl text-sm focus:outline-none focus:border-brand"
+                placeholder="π.χ. name@aegean.gr ή name@company.com"
+                value={passEmailInput}
+                onChange={(e) => setPassEmailInput(e.target.value)}
+                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand"
               />
               <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={() => setShowB2bModal(false)}
-                  className="flex-1 py-2 text-xs font-bold text-text-muted bg-subtle rounded-xl cursor-pointer"
+                  onClick={() => setShowPassModal(false)}
+                  className="flex-1 py-2.5 bg-subtle rounded-xl text-xs font-semibold hover:bg-border-theme text-text-main transition cursor-pointer"
                 >
-                  Ακύρωση
+                  Κλείσιμο
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl cursor-pointer"
+                  className="flex-1 py-2.5 bg-brand text-white rounded-xl text-xs font-bold hover:bg-brand-hover transition cursor-pointer shadow-sm"
                 >
-                  Επαλήθευση
+                  Ενεργοποίηση Πάσου
                 </button>
               </div>
             </form>
@@ -1035,142 +1679,88 @@ export default function Home() {
         </div>
       )}
 
-      {/* BOOKING MODAL (Επιβεβαίωση Κράτησης & Έκδοση Εισιτηρίου) */}
-      {bookingSlot && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-card border-2 border-brand rounded-3xl p-6 w-full max-w-md shadow-2xl space-y-4">
-            {!bookedTicketCode ? (
-              <form onSubmit={handleConfirmBooking} className="space-y-4">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <span className="text-[10px] font-black uppercase tracking-wider bg-brand text-white px-2.5 py-0.5 rounded-full">
-                      ΑΜΕΣΗ ΚΡΑΤΗΣΗ HAPPYSEATS
-                    </span>
-                    <h3 className="text-xl font-black text-text-main mt-1">
-                      {bookingSlot.venueName}
-                    </h3>
-                    <p className="text-xs text-text-muted">
-                      🕒 {bookingSlot.timeWindow} • Έκπτωση{" "}
-                      <strong className="text-brand-text">{bookingSlot.discount}</strong>
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setBookingSlot(null)}
-                    className="text-sm text-text-muted hover:text-text-main cursor-pointer"
-                  >
-                    ✕
-                  </button>
-                </div>
+      {/* Pop-up Επιβεβαίωσης Κράτησης */}
+      {selectedSlot && selectedVenue && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-card border border-border-theme p-6 rounded-3xl max-w-sm w-full space-y-4 shadow-2xl">
+            <h3 className="font-bold text-lg text-text-main">
+              Επιβεβαίωση Κράτησης
+            </h3>
+            <p className="text-sm text-text-muted">
+              {selectedVenue.name} ({selectedSlot.timeWindow})
+            </p>
+            <div className="text-xs text-brand-text font-bold">
+              {selectedSlot.discount} {selectedSlot.bonusPerk}
+            </div>
 
-                {bookingSlot.bonusPerk && (
-                  <div className="p-3 rounded-2xl bg-amber-400/15 border border-amber-400 text-xs font-bold text-text-main">
-                    {bookingSlot.bonusPerk}
-                  </div>
-                )}
+            <div>
+              <label className="block text-xs text-text-muted font-medium mb-1">
+                Τρόπος Εξυπηρέτησης:
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={selectedVenue.tableStatus === "full"}
+                  onClick={() => setOrderMode("dine-in")}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                    orderMode === "dine-in"
+                      ? "bg-brand text-white border-brand shadow-sm"
+                      : "bg-subtle text-text-main border-border-theme"
+                  } disabled:opacity-40`}
+                >
+                  🍽️ Τραπέζι
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectedVenue.takeawayReady}
+                  onClick={() => setOrderMode("takeaway")}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                    orderMode === "takeaway"
+                      ? "bg-brand text-white border-brand shadow-sm"
+                      : "bg-subtle text-text-main border-border-theme"
+                  } disabled:opacity-40`}
+                >
+                  🛍️ Παραλαβή
+                </button>
+              </div>
+            </div>
 
-                <div>
-                  <label className="block text-xs font-bold text-text-muted mb-1.5">
-                    Αριθμός Ατόμων
-                  </label>
-                  <div className="grid grid-cols-6 gap-2">
-                    {[1, 2, 3, 4, 5, 6].map((num) => (
-                      <button
-                        key={num}
-                        type="button"
-                        onClick={() => setPartySize(num)}
-                        className={`py-2 rounded-xl text-xs font-black border transition cursor-pointer ${
-                          partySize === num
-                            ? "bg-brand text-white border-brand"
-                            : "bg-subtle text-text-main border-border-theme"
-                        }`}
-                      >
-                        {num}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-text-muted mb-1.5">
-                    Τρόπος Εξυπηρέτησης
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setOrderMode("dine-in")}
-                      className={`py-2.5 rounded-xl text-xs font-bold border transition cursor-pointer ${
-                        orderMode === "dine-in"
-                          ? "bg-brand text-white border-brand"
-                          : "bg-subtle text-text-main border-border-theme"
-                      }`}
-                    >
-                      🍽️ Κράτηση Τραπεζιού
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setOrderMode("takeaway")}
-                      className={`py-2.5 rounded-xl text-xs font-bold border transition cursor-pointer ${
-                        orderMode === "takeaway"
-                          ? "bg-brand text-white border-brand"
-                          : "bg-subtle text-text-main border-border-theme"
-                      }`}
-                    >
-                      🛍️ Take-away Παραλαβή
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex gap-2 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setBookingSlot(null)}
-                    className="flex-1 py-3 rounded-xl bg-subtle text-text-muted font-bold text-xs cursor-pointer"
-                  >
-                    Ακύρωση
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isSubmittingBooking}
-                    className="flex-1 py-3 rounded-xl bg-brand hover:bg-brand-hover text-white font-black text-xs shadow-sm cursor-pointer disabled:opacity-50"
-                  >
-                    {isSubmittingBooking
-                      ? "Καταχώρηση..."
-                      : `✓ Κλείδωμα (${bookingSlot.discount})`}
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <div className="text-center space-y-4 py-2">
-                <div className="w-14 h-14 rounded-3xl bg-emerald-500/20 text-emerald-500 flex items-center justify-center text-3xl mx-auto">
-                  ✓
-                </div>
-                <h3 className="text-lg font-black text-text-main">
-                  Η Κράτησή σου Επιβεβαιώθηκε!
-                </h3>
-                <p className="text-xs text-text-muted">
-                  Δείξε τον παρακάτω κωδικό στο κατάστημα <strong>{bookingSlot.venueName}</strong>:
-                </p>
-                <div className="p-4 rounded-2xl bg-subtle border-2 border-dashed border-brand font-mono text-2xl font-black text-brand-text tracking-widest">
-                  {bookedTicketCode}
-                </div>
-                <div className="flex gap-2 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setBookingSlot(null)}
-                    className="flex-1 py-2.5 rounded-xl bg-subtle text-text-main font-bold text-xs cursor-pointer"
-                  >
-                    Κλείσιμο
-                  </button>
-                  <Link
-                    href="/my-tickets"
-                    className="flex-1 py-2.5 rounded-xl bg-brand text-white font-black text-xs flex items-center justify-center"
-                  >
-                    🎟️ Τα Εισιτήριά μου →
-                  </Link>
-                </div>
+            {orderMode === "dine-in" && (
+              <div>
+                <label className="block text-xs text-text-muted font-medium mb-1">
+                  Αριθμός Ατόμων:
+                </label>
+                <select
+                  value={partySize}
+                  onChange={(e) => setPartySize(Number(e.target.value))}
+                  className="w-full bg-subtle border border-border-theme rounded-xl p-2.5 text-sm text-text-main focus:outline-none focus:border-brand cursor-pointer"
+                >
+                  {[1, 2, 3, 4, 5, 6, 8].map((num) => (
+                    <option key={num} value={num}>
+                      {num} άτομα
+                    </option>
+                  ))}
+                </select>
               </div>
             )}
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setSelectedSlot(null)}
+                className="flex-1 py-2.5 bg-subtle rounded-xl text-sm font-semibold hover:bg-border-theme text-text-main transition cursor-pointer"
+              >
+                Άκυρο
+              </button>
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={handleBooking}
+                className="flex-1 py-2.5 bg-brand text-white rounded-xl text-sm font-bold hover:bg-brand-hover transition disabled:opacity-50 cursor-pointer shadow-sm"
+              >
+                {isSubmitting ? "Έκδοση..." : "Έκδοση Ticket"}
+              </button>
+            </div>
           </div>
         </div>
       )}
