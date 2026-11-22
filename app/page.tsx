@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
@@ -10,7 +10,6 @@ import {
   collection,
   onSnapshot,
   doc,
-  getDoc,
   runTransaction,
   serverTimestamp,
   query,
@@ -160,22 +159,17 @@ function useCountdown(timeWindow: string) {
   return timeLeft;
 }
 
-// Προσθέσαμε το userStreak στα props του component!
 function SlotItem({
   slot,
-  userStreak, // <--- ΝΕΟ
+  userStreak,
   onSelect,
 }: {
   slot: SlotDeal;
-  userStreak: number; // <--- ΝΕΟ
+  userStreak: number;
   onSelect: () => void;
 }) {
   const { label, isExpired } = useCountdown(slot.timeWindow);
-  
-  // Έλεγχος αν ο χρήστης έχει πρόσβαση στο VIP Deal
-  const isLockedVip = slot.isVipOnly && userStreak < 3; 
-  
-  // Είναι διαθέσιμο μόνο αν υπάρχουν τραπέζια, δεν έχει λήξει ΚΑΙ δεν είναι κλειδωμένο VIP
+  const isLockedVip = Boolean(slot.isVipOnly && userStreak < 3);
   const isAvailable = slot.availableTables > 0 && !isExpired && !isLockedVip;
 
   return (
@@ -268,8 +262,8 @@ function SlotItem({
             : "bg-subtle text-text-muted cursor-not-allowed shadow-none border border-border-theme"
         }`}
       >
-        {isLockedVip 
-          ? "🔒 Μόνο για VIPs" 
+        {isLockedVip
+          ? "🔒 Μόνο για VIPs"
           : isExpired
           ? "Έληξε"
           : slot.availableTables > 0
@@ -306,11 +300,15 @@ export default function Home() {
   const [onlyTakeaway, setOnlyTakeaway] = useState(false);
   const [showMap, setShowMap] = useState(false);
 
-  // Dark/Light Mode & Gamification Streak
+  // Dark/Light Mode, Gamification Streak & Micro-Zone Pass (Live από Firestore)
   const [isDarkMode, setIsDarkMode] = useState(false);
-  const [userStreak, setUserStreak] = useState(2);
+  const [userStreak, setUserStreak] = useState(0);
+  const [verifiedPass, setVerifiedPass] = useState<{
+    type: "student" | "office";
+    email: string;
+  } | null>(null);
 
-  // #5, #6, #7 Live Smart States (Πλέον συνδεδεμένα με τη Βάση!)
+  // Live Smart States
   const [rainModeActive, setRainModeActive] = useState(false);
   const [showMissYouBanner, setShowMissYouBanner] = useState(false);
   const [bountyCountdown, setBountyCountdown] = useState(599);
@@ -327,18 +325,13 @@ export default function Home() {
   } | null>(null);
   const [squadSecondsLeft, setSquadSecondsLeft] = useState<number>(0);
 
-  // Micro-Zones Pass
-  const [showPassModal, setShowPassModal] = useState(false);
-  const [passEmailInput, setPassEmailInput] = useState("");
-  const [verifiedPass, setVerifiedPass] = useState<{
-    type: "student" | "office";
-    email: string;
-  } | null>(null);
-
   useEffect(() => {
     // Φόρτωση Theme
     const savedTheme = localStorage.getItem("happyseats_theme");
-    if (savedTheme === "dark" || (!savedTheme && window.matchMedia("(prefers-color-scheme: dark)").matches)) {
+    if (
+      savedTheme === "dark" ||
+      (!savedTheme && window.matchMedia("(prefers-color-scheme: dark)").matches)
+    ) {
       setIsDarkMode(true);
       document.documentElement.classList.add("dark");
     } else {
@@ -346,43 +339,49 @@ export default function Home() {
       document.documentElement.classList.remove("dark");
     }
 
-    // Φόρτωση Pass
-    const savedPass = typeof window !== "undefined" ? localStorage.getItem("happyseats_microzone_pass") : null;
-    if (savedPass) {
-      try {
-        const parsed = JSON.parse(savedPass);
-        queueMicrotask(() => setVerifiedPass(parsed));
-      } catch {}
-    }
-
-    let unsubUser = () => {}; // Βοηθητικό για να κλείνουμε το listener
+    let unsubUser = () => {};
 
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
       if (user) {
         try {
-          // 🔴 ΑΛΛΑΓΗ: onSnapshot αντί για getDoc για να ενημερώνονται Live τα ☕!
-          unsubUser = onSnapshot(doc(db, "users", user.uid), (docSnap) => {
-            if (docSnap.exists()) {
-              setUserStreak(docSnap.data().streak ?? 0);
-            } else {
-              setUserStreak(0);
+          // Live παρακολούθηση VIP Streak & Micro-Zone Pass από Firestore
+          unsubUser = onSnapshot(
+            doc(db, "users", user.uid),
+            (docSnap) => {
+              if (docSnap.exists()) {
+                const data = docSnap.data();
+                setUserStreak(data.streak ?? 0);
+                setVerifiedPass(data.microZonePass || null);
+              } else {
+                setUserStreak(0);
+                setVerifiedPass(null);
+              }
+            },
+            (err) => {
+              if (err.code !== "permission-denied") console.error(err);
             }
-          });
+          );
 
-          // 🤖 ΑΛΓΟΡΙΘΜΟΣ "MISS YOU": Έλεγχος τελευταίας επίσκεψης!
-          const qAll = query(collection(db, "bookings"), where("customerId", "==", user.uid));
+          // Αλγόριθμος "MISS YOU": Έλεγχος τελευταίας επίσκεψης (>14 μέρες)
+          const qAll = query(
+            collection(db, "bookings"),
+            where("customerId", "==", user.uid)
+          );
           const snapAll = await getDocs(qAll);
           const pastBookings = snapAll.docs
             .map((d) => d.data())
             .filter((b) => b.status === "checked_in" || b.status === "used")
-            .sort((a, b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
+            .sort(
+              (a, b) =>
+                (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0)
+            );
 
           if (pastBookings.length > 0) {
             const lastCheckIn = pastBookings[0].createdAt?.toDate();
             if (lastCheckIn) {
               const diffTime = Math.abs(new Date().getTime() - lastCheckIn.getTime());
-              const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+              const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
               if (diffDays > 14) {
                 setShowMissYouBanner(true);
               }
@@ -392,18 +391,20 @@ export default function Home() {
           console.error("Σφάλμα ανάκτησης ιστορικού:", err);
         }
       } else {
-        unsubUser(); // Αν κάνει logout, σταματάμε να παρακολουθούμε
+        unsubUser();
+        setUserStreak(0);
+        setVerifiedPass(null);
+        setShowMissYouBanner(false);
       }
     });
 
-    // Ο κεντρικός διακόπτης του Admin λειτουργεί πλέον ως "Force Demo"
-    // (αν θες να το δείξεις σε παρουσίαση χωρίς να περιμένεις 14 μέρες)
+    // Global Automations (Καιρός & Force Demo Miss You από Admin)
     const unsubSettings = onSnapshot(doc(db, "settings", "system"), (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
         setRainModeActive(data.isRaining === true);
         if (data.globalMissYou === true) {
-          setShowMissYouBanner(true); // Το κάνουμε Force από τον Admin
+          setShowMissYouBanner(true);
         }
       } else {
         setRainModeActive(false);
@@ -412,6 +413,7 @@ export default function Home() {
 
     return () => {
       unsubAuth();
+      unsubUser();
       unsubSettings();
     };
   }, []);
@@ -427,7 +429,10 @@ export default function Home() {
   useEffect(() => {
     if (!squadHold) return;
     const interval = setInterval(() => {
-      const diff = Math.max(0, Math.floor((squadHold.expiresAt - Date.now()) / 1000));
+      const diff = Math.max(
+        0,
+        Math.floor((squadHold.expiresAt - Date.now()) / 1000)
+      );
       setSquadSecondsLeft(diff);
       if (diff <= 0) {
         setSquadHold(null);
@@ -441,7 +446,6 @@ export default function Home() {
       const vArr: VenueDoc[] = [];
       snap.docs.forEach((d, index) => {
         const data = d.data();
-        // Αν το κατάστημα έχει τεθεί σε αναστολή συνδρομής από τον Admin, ΔΕΝ εμφανίζεται στους πελάτες!
         if (data.isPublished === false || data.subscriptionStatus === "past_due") {
           return;
         }
@@ -464,7 +468,8 @@ export default function Home() {
           lat: Number(data.lat) || 37.9753 + index * 0.004,
           lng: Number(data.lng) || 23.7361 + index * 0.004,
           tableStatus: (data.tableStatus as TableStatus) || "plenty",
-          takeawayReady: data.takeawayReady !== undefined ? Boolean(data.takeawayReady) : true,
+          takeawayReady:
+            data.takeawayReady !== undefined ? Boolean(data.takeawayReady) : true,
           panicDealActive: Boolean(data.panicDealActive),
           panicDealText: data.panicDealText || "-30% στα επόμενα 3 τραπέζια (1 ώρα)",
           vibeTags: Array.isArray(data.vibeTags) ? data.vibeTags : defaultVibes,
@@ -474,7 +479,8 @@ export default function Home() {
           missYouCampaign: Boolean(data.missYouCampaign),
           bountyActive: Boolean(data.bountyActive),
           bountyText: data.bountyText || "-40% + Δωρεάν Ορεκτικό (Bounty 10')",
-          isPublished: data.isPublished !== undefined ? Boolean(data.isPublished) : true,
+          isPublished:
+            data.isPublished !== undefined ? Boolean(data.isPublished) : true,
           subscriptionStatus: data.subscriptionStatus || "active",
         });
       });
@@ -540,7 +546,11 @@ export default function Home() {
     for (const a of areaKeywords) {
       if (text.includes(a.key) || text.includes(a.alt)) {
         requestedAreaName = a.name;
-        if (availableAreasInDb.some((dbArea) => dbArea.toLowerCase() === a.name.toLowerCase())) {
+        if (
+          availableAreasInDb.some(
+            (dbArea) => dbArea.toLowerCase() === a.name.toLowerCase()
+          )
+        ) {
           detectedArea = a.name;
           notes.push(`περιοχή ${a.name}`);
         }
@@ -557,7 +567,9 @@ export default function Home() {
       text.includes("πρωινό") ||
       text.includes("καφέ")
     ) {
-      if (venueList.some((v) => (v.vibeTags || []).includes("💻 Χαλαρό για δουλειά"))) {
+      if (
+        venueList.some((v) => (v.vibeTags || []).includes("💻 Χαλαρό για δουλειά"))
+      ) {
         detectedVibes.push("💻 Χαλαρό για δουλειά");
       }
       notes.push("ιδανικό για καφέ/πρωινό ή laptop");
@@ -570,11 +582,21 @@ export default function Home() {
       notes.push("προβολή αγώνα & μπύρες");
     }
 
-    if (text.includes("ραντεβού") || text.includes("ζεστ") || text.includes("σόμπ") || text.includes("βροχ")) {
+    if (
+      text.includes("ραντεβού") ||
+      text.includes("ζεστ") ||
+      text.includes("σόμπ") ||
+      text.includes("βροχ")
+    ) {
       notes.push("cozy ατμόσφαιρα");
     }
 
-    if (text.includes("bounty") || text.includes("ακύρωσ") || text.includes("μεγάλη έκπτωση") || text.includes("προσφορ")) {
+    if (
+      text.includes("bounty") ||
+      text.includes("ακύρωσ") ||
+      text.includes("μεγάλη έκπτωση") ||
+      text.includes("προσφορ")
+    ) {
       detectedDiscount = 30;
       notes.push("μεγάλες εκπτώσεις (άνω του 30%)");
     }
@@ -621,13 +643,11 @@ export default function Home() {
     const panicWindow = `${formatTime(now)} - ${formatTime(oneHourLater)}`;
 
     return venueList.map((v) => {
-      // 🛠️ FIX: Κάνουμε "βαθύ αντίγραφο" (.map(s => ({ ...s }))) των slots, 
-      // ώστε να μην αλλοιώνουμε τα πρωτότυπα δεδομένα στη μνήμη!
       const matchedSlots = slotList
         .filter((s) => s.venueName === v.name || s.venueId === v.id)
         .map((s) => ({ ...s }));
 
-      // #7 No-Show Bounty Slot (Ελέγχεται πλέον ΑΠΟΚΛΕΙΣΤΙΚΑ από το μαγαζί, βγάλαμε το demo!)
+      // #7 No-Show Bounty Slot
       if (v.bountyActive) {
         matchedSlots.unshift({
           id: `bounty-${v.id}`,
@@ -656,7 +676,7 @@ export default function Home() {
         });
       }
 
-      // #5 Weather-Triggered Deal Slot (Ενεργοποιείται αν βρέχει ΚΑΙ το μαγαζί το έχει ON)
+      // #5 Weather-Triggered Deal Slot
       if (rainModeActive && v.rainAutoDeal) {
         matchedSlots.push({
           id: `rain-${v.id}`,
@@ -671,7 +691,7 @@ export default function Home() {
         });
       }
 
-      // Micro-Zone Pass Slot
+      // Micro-Zone Pass Slot (από το προφίλ του συνδεδεμένου χρήστη)
       if (verifiedPass && v.microZoneType === verifiedPass.type) {
         matchedSlots.push({
           id: `microzone-${v.id}`,
@@ -689,7 +709,7 @@ export default function Home() {
         });
       }
 
-      // 💌 ΝΕΟ: Εφαρμογή του Miss You Perk στα slots (Εφαρμόζεται ΠΑΝΤΑ σε "φρέσκα" slots)
+      // #6 Miss You Perk
       if (showMissYouBanner && v.missYouCampaign) {
         matchedSlots.forEach((s) => {
           if (!s.bonusPerk) {
@@ -776,7 +796,6 @@ export default function Home() {
     onlyTakeaway,
   ]);
 
-  // Υπολογισμός της μεγαλύτερης έκπτωσης (bestDiscount) για κάθε πινέζα στον χάρτη
   const mapVenuesData = useMemo(() => {
     return filteredVenues.map((v) => {
       let maxDisc = 20;
@@ -839,28 +858,6 @@ export default function Home() {
       await navigator.clipboard.writeText(`${shareText} ${shareUrl}`);
       alert("⏳ Το τραπέζι κλειδώθηκε για 15 λεπτά! Το link αντιγράφηκε.");
     }
-  };
-
-  const handleVerifyPass = (e: React.FormEvent) => {
-    e.preventDefault();
-    const clean = passEmailInput.trim().toLowerCase();
-    if (!clean.includes("@")) {
-      alert("Παρακαλώ εισάγετε ένα έγκυρο email.");
-      return;
-    }
-
-    const isStudent =
-      clean.endsWith(".edu.gr") ||
-      clean.includes("uni") ||
-      clean.includes("student") ||
-      clean.endsWith(".gr");
-
-    const passType: "student" | "office" = isStudent ? "student" : "office";
-    const newPass = { type: passType, email: clean };
-    setVerifiedPass(newPass);
-    localStorage.setItem("happyseats_microzone_pass", JSON.stringify(newPass));
-    setShowPassModal(false);
-    setPassEmailInput("");
   };
 
   const handleShareCurrentBooking = async () => {
@@ -965,7 +962,8 @@ export default function Home() {
             status: "confirmed",
             customerId: currentUser.uid,
             customerEmail: currentUser.email,
-            customerName: currentUser.displayName || currentUser.email || "Πελάτης",
+            customerName:
+              currentUser.displayName || currentUser.email || "Πελάτης",
             createdAt: serverTimestamp(),
           });
         });
@@ -989,19 +987,11 @@ export default function Home() {
             status: "confirmed",
             customerId: currentUser.uid,
             customerEmail: currentUser.email,
-            customerName: currentUser.displayName || currentUser.email || "Πελάτης",
+            customerName:
+              currentUser.displayName || currentUser.email || "Πελάτης",
             createdAt: serverTimestamp(),
           });
         });
-      }
-
-      const stored = localStorage.getItem("happyseats_tickets");
-      const existingCodes = stored ? JSON.parse(stored) : [];
-      if (!existingCodes.includes(code)) {
-        localStorage.setItem(
-          "happyseats_tickets",
-          JSON.stringify([code, ...existingCodes])
-        );
       }
 
       setCurrentBooking(newBooking);
@@ -1037,42 +1027,19 @@ export default function Home() {
             {isDarkMode ? "🌞" : "🌙"}
           </button>
 
-          <button
-            onClick={() => setShowPassModal(true)}
-            className={`text-xs font-bold px-3 py-2 rounded-xl transition border flex items-center gap-1.5 cursor-pointer ${
-              verifiedPass
-                ? "bg-indigo-50 text-indigo-700 border-indigo-200"
-                : "bg-card hover:bg-subtle text-text-main border-border-theme shadow-sm"
-            }`}
-          >
-            {verifiedPass ? (
-              <>
-                <span>{verifiedPass.type === "student" ? "🎓" : "💼"}</span>
-                <span>
-                  {verifiedPass.type === "student"
-                    ? "Φοιτητικό Πάσο Ενεργό"
-                    : "Office Pass Ενεργό"}
-                </span>
-              </>
-            ) : (
-              <>
-                <span>🎓/💼</span>
-                <span>Πάσο / Office Break</span>
-              </>
-            )}
-          </button>
-
-          <Link
-            href="/my-tickets"
-            className="text-xs font-semibold px-3 py-2 bg-card hover:bg-subtle text-text-main rounded-xl transition border border-border-theme shadow-sm flex items-center gap-1"
-          >
-            🎟️ Τα Εισιτήριά μου
-          </Link>
-
           {currentUser ? (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Link
+                href="/my-tickets"
+                className="text-xs font-semibold px-3 py-2 bg-card hover:bg-subtle text-text-main rounded-xl transition border border-border-theme shadow-sm flex items-center gap-1"
+              >
+                🎟️ Τα Εισιτήριά μου
+              </Link>
+
               <div className="hidden sm:flex items-center gap-1 px-2.5 py-1.5 bg-brand/10 rounded-xl border border-brand/20">
-                <span className="text-[11px] font-bold text-brand-text">VIP Streak:</span>
+                <span className="text-[11px] font-bold text-brand-text">
+                  VIP Streak:
+                </span>
                 <div className="flex gap-0.5">
                   {[1, 2, 3].map((i) => (
                     <span
@@ -1086,9 +1053,23 @@ export default function Home() {
                   ))}
                 </div>
               </div>
-              <span className="text-xs text-text-muted hidden sm:inline font-medium">
-                👤 {currentUser.displayName || currentUser.email?.split("@")[0]}
-              </span>
+
+              <Link
+                href="/account"
+                className="text-xs font-semibold px-3 py-2 bg-card hover:bg-subtle text-text-main rounded-xl transition border border-border-theme shadow-sm flex items-center gap-1.5"
+                title="Ρυθμίσεις Λογαριασμού & Πάσο"
+              >
+                <span>👤</span>
+                <span>
+                  {currentUser.displayName || currentUser.email?.split("@")[0]}
+                </span>
+                {verifiedPass && (
+                  <span className="text-[10px]">
+                    {verifiedPass.type === "student" ? "🎓" : "💼"}
+                  </span>
+                )}
+              </Link>
+
               <button
                 onClick={() => signOut(auth)}
                 className="text-xs px-2.5 py-2 bg-card hover:bg-subtle text-text-muted hover:text-red-600 rounded-xl transition border border-border-theme shadow-sm cursor-pointer"
@@ -1099,23 +1080,25 @@ export default function Home() {
           ) : (
             <Link
               href="/login"
-              className="text-xs font-bold px-3 py-2 bg-brand hover:bg-brand-hover text-white rounded-xl transition shadow-sm"
+              className="text-xs font-bold px-3.5 py-2 bg-brand hover:bg-brand-hover text-white rounded-xl transition shadow-sm"
             >
               Σύνδεση
             </Link>
           )}
 
           <Link
-            href="/merchant/login"
+            href="/merchant"
             className="text-xs font-semibold px-3 py-2 bg-card hover:bg-brand-light text-brand-text rounded-xl transition border border-border-theme shadow-sm hidden md:inline-block"
           >
             Συνεργάτες Εστίασης →
           </Link>
 
           {currentUser?.email &&
-            ["skampanar@gmail.com", "olga_dre@yahoo.gr", "tommyanastaso@gmail.com"].includes(
-              currentUser.email.toLowerCase().trim()
-            ) && (
+            [
+              "skampanar@gmail.com",
+              "olga_dre@yahoo.gr",
+              "tommyanastaso@gmail.com",
+            ].includes(currentUser.email.toLowerCase().trim()) && (
               <Link
                 href="/admin"
                 className="text-xs font-bold px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl transition shadow-sm flex items-center gap-1"
@@ -1217,7 +1200,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* 🔴 LIVE WEATHER RADAR BAR (Εμφανίζεται ΜΟΝΟ όταν βρέχει στο σύστημα!) */}
+        {/* LIVE WEATHER RADAR BAR */}
         {rainModeActive && (
           <section className="bg-sky-50 border-2 border-sky-400 rounded-3xl p-4 shadow-sm flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 animate-pulse">
             <div className="flex items-center gap-3">
@@ -1241,7 +1224,7 @@ export default function Home() {
           </section>
         )}
 
-        {/* 🔴 AUTO "MISS YOU" CAMPAIGN BANNER */}
+        {/* AUTO "MISS YOU" CAMPAIGN BANNER */}
         {showMissYouBanner && (
           <section className="p-4 rounded-3xl bg-purple-500/10 border-2 border-purple-400/40 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm">
             <div className="flex items-center gap-3">
@@ -1271,7 +1254,7 @@ export default function Home() {
           </section>
         )}
 
-        {/* #9 AI MOOD CONCIERGE (Ο ΨΗΦΙΑΚΟΣ ΜΕΤΡ) */}
+        {/* #9 AI MOOD CONCIERGE */}
         <section className="bg-card border-2 border-brand rounded-3xl p-5 sm:p-6 shadow-sm space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
@@ -1432,7 +1415,9 @@ export default function Home() {
           <div className="flex justify-between items-center pt-2 border-t border-border-theme text-xs">
             <span className="text-text-muted">
               Βρέθηκαν{" "}
-              <strong className="text-brand-text font-bold">{filteredVenues.length}</strong>{" "}
+              <strong className="text-brand-text font-bold">
+                {filteredVenues.length}
+              </strong>{" "}
               καταστήματα
             </span>
             <div className="flex items-center gap-4">
@@ -1468,7 +1453,9 @@ export default function Home() {
 
         {showMap && <VenueMap venues={mapVenuesData} />}
 
-        <h2 className="text-xl font-bold text-text-main">Διαθέσιμες Προσφορές Σήμερα</h2>
+        <h2 className="text-xl font-bold text-text-main">
+          Διαθέσιμες Προσφορές Σήμερα
+        </h2>
 
         {loading ? (
           <div className="text-center py-20 text-text-muted text-sm">
@@ -1599,11 +1586,15 @@ export default function Home() {
                         >
                           <SlotItem
                             slot={slot}
-                            userStreak={userStreak} // <--- Πρόσθεσε αυτό εδώ!
+                            userStreak={userStreak}
                             onSelect={() => {
                               setSelectedVenue(venue);
                               setSelectedSlot(slot);
-                              setOrderMode(venue.tableStatus === "full" ? "takeaway" : "dine-in");
+                              setOrderMode(
+                                venue.tableStatus === "full"
+                                  ? "takeaway"
+                                  : "dine-in"
+                              );
                             }}
                           />
                         </div>
@@ -1616,79 +1607,6 @@ export default function Home() {
           </div>
         )}
       </main>
-
-      {/* Modal Επαλήθευσης Πάσου */}
-      {showPassModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-card border border-border-theme p-6 rounded-3xl max-w-md w-full space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-lg text-text-main">
-                🎓 / 💼 Ξεκλείδωμα Micro-Zone Deals
-              </h3>
-              <button
-                onClick={() => setShowPassModal(false)}
-                className="text-text-muted hover:text-text-main text-sm cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            <p className="text-xs text-text-muted leading-relaxed">
-              Δήλωσε το ακαδημαϊκό σου email (π.χ. <code>.edu.gr</code>) ή εταιρικό email για{" "}
-              <strong>Office Lunch Break deals (13:00–16:00)</strong>.
-            </p>
-
-            {verifiedPass && (
-              <div className="p-3 rounded-2xl bg-indigo-50 border border-indigo-200 flex items-center justify-between text-xs">
-                <div>
-                  <div className="font-bold text-indigo-700">
-                    Ενεργό:{" "}
-                    {verifiedPass.type === "student"
-                      ? "🎓 Φοιτητικό Πάσο"
-                      : "💼 Office Break Pass"}
-                  </div>
-                  <div className="text-text-muted">{verifiedPass.email}</div>
-                </div>
-                <button
-                  onClick={() => {
-                    setVerifiedPass(null);
-                    localStorage.removeItem("happyseats_microzone_pass");
-                  }}
-                  className="text-red-600 hover:underline font-semibold cursor-pointer"
-                >
-                  Αφαίρεση
-                </button>
-              </div>
-            )}
-
-            <form onSubmit={handleVerifyPass} className="space-y-3">
-              <input
-                type="email"
-                required
-                placeholder="π.χ. name@aegean.gr ή name@company.com"
-                value={passEmailInput}
-                onChange={(e) => setPassEmailInput(e.target.value)}
-                className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm text-text-main focus:outline-none focus:border-brand"
-              />
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowPassModal(false)}
-                  className="flex-1 py-2.5 bg-subtle rounded-xl text-xs font-semibold hover:bg-border-theme text-text-main transition cursor-pointer"
-                >
-                  Κλείσιμο
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 py-2.5 bg-brand text-white rounded-xl text-xs font-bold hover:bg-brand-hover transition cursor-pointer shadow-sm"
-                >
-                  Ενεργοποίηση Πάσου
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
 
       {/* Pop-up Επιβεβαίωσης Κράτησης */}
       {selectedSlot && selectedVenue && (

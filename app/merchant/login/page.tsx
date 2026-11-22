@@ -1,5 +1,9 @@
 "use client";
 
+import { useEffect } from "react";
+import { onAuthStateChanged } from "firebase/auth";
+import { doc, getDoc, collection, query, where, getDocs } from "firebase/firestore";
+import { auth, db } from "@/lib/firebase";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -7,8 +11,7 @@ import {
   signInWithEmailAndPassword,
   sendPasswordResetEmail,
 } from "firebase/auth";
-import { auth, db } from "@/lib/firebase";
-import { doc, getDoc } from "firebase/firestore";
+
 
 export default function MerchantAuthPage() {
   const router = useRouter();
@@ -79,6 +82,32 @@ export default function MerchantAuthPage() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!user) return;
+
+      // Έλεγχος αν είναι ήδη εγγεγραμμένος Merchant
+      const mSnap = await getDoc(doc(db, "merchants", user.uid));
+      if (mSnap.exists()) {
+        router.replace("/merchant");
+        return;
+      }
+
+      if (user.email) {
+        const q = query(
+          collection(db, "merchants"),
+          where("email", "==", user.email.toLowerCase().trim())
+        );
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          router.replace("/merchant");
+        }
+      }
+    });
+
+    return () => unsub();
+  }, [router]);
 
   return (
     <div className="min-h-screen bg-surface text-text-main flex flex-col justify-center items-center p-6">
@@ -240,12 +269,9 @@ export default function MerchantAuthPage() {
             <p className="text-[11px] leading-relaxed">
               Η εγγραφή νέων καταστημάτων γίνεται αποκλειστικά κατόπιν επικοινωνίας, ελέγχου στοιχείων και ενεργοποίησης μηνιαίας συνδρομής από την ομάδα μας.
             </p>
-            <a
-              href="mailto:partners@happyseats.gr?subject=Αίτηση%20Συνεργασίας%20HappySeats"
-              className="inline-block text-brand-text font-bold hover:underline text-xs pt-1"
-            >
-              Αίτηση Συνεργασίας μέσω Email →
-            </a>
+            <Link href="/merchant/apply" className="text-brand font-bold hover:underline">
+              Αίτηση Συνεργασίας →
+            </Link>
           </div>
         </div>
 

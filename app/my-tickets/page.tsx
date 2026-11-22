@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
@@ -28,58 +29,43 @@ export default function MyTicketsPage() {
   const [tickets, setTickets] = useState<BookingRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
+const router = useRouter();
+  const [authChecked, setAuthChecked] = useState(false);
+
   useEffect(() => {
     const unsubAuth = onAuthStateChanged(auth, (user) => {
-      setCurrentUser(user);
-    });
-    return () => unsubAuth();
-  }, []);
-
-  useEffect(() => {
-    if (currentUser) {
-      const q = query(
-        collection(db, "bookings"),
-        where("customerId", "==", currentUser.uid)
-      );
-
-      const unsub = onSnapshot(q, (snapshot) => {
-        const list: BookingRecord[] = [];
-        snapshot.forEach((d) => {
-          list.push({ id: d.id, ...(d.data() as Omit<BookingRecord, "id">) });
-        });
-        setTickets(list);
+      if (!user) {
+        setCurrentUser(null);
+        setTickets([]);
         setLoading(false);
-      });
-
-      return () => unsub();
-    } else {
-      const stored = typeof window !== "undefined" ? localStorage.getItem("happyseats_tickets") : null;
-      const codes: string[] = stored ? JSON.parse(stored) : [];
-
-      if (codes.length === 0) {
-        queueMicrotask(() => {
-          setTickets([]);
-          setLoading(false);
-        });
+        setAuthChecked(true);
+        router.replace("/login");
         return;
       }
+      setCurrentUser(user);
+      setAuthChecked(true);
+    });
+    return () => unsubAuth();
+  }, [router]);
 
-      const q = query(
-        collection(db, "bookings"),
-        where("ticketCode", "in", codes.slice(0, 10))
-      );
+  useEffect(() => {
+    if (!currentUser) return;
 
-      const unsub = onSnapshot(q, (snapshot) => {
-        const list: BookingRecord[] = [];
-        snapshot.forEach((d) => {
-          list.push({ id: d.id, ...(d.data() as Omit<BookingRecord, "id">) });
-        });
-        setTickets(list);
-        setLoading(false);
+    const q = query(
+      collection(db, "bookings"),
+      where("customerId", "==", currentUser.uid)
+    );
+
+    const unsub = onSnapshot(q, (snapshot) => {
+      const list: BookingRecord[] = [];
+      snapshot.forEach((d) => {
+        list.push({ id: d.id, ...(d.data() as Omit<BookingRecord, "id">) });
       });
+      setTickets(list);
+      setLoading(false);
+    });
 
-      return () => unsub();
-    }
+    return () => unsub();
   }, [currentUser]);
 
   const handleShare = async (ticket: BookingRecord) => {
@@ -99,6 +85,14 @@ export default function MyTicketsPage() {
       alert("Τα στοιχεία της κράτησης αντιγράφηκαν!");
     }
   };
+
+if (!authChecked || !currentUser) {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center text-sm text-text-muted">
+        Ανακατεύθυνση στη σύνδεση...
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-surface text-text-main p-6">

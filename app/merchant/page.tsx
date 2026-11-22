@@ -21,6 +21,24 @@ import {
 import { auth, db } from "@/lib/firebase";
 import { VIBE_OPTIONS } from "@/app/page";
 import type { TableStatus } from "@/components/VenueMap";
+import { PLAN_LIST, SUBSCRIPTION_PLANS, SubscriptionPlanId } from "@/lib/plans";
+
+interface MerchantProfile {
+  companyName?: string;
+  vatNumber?: string;
+  taxOffice?: string;
+  contactName?: string;
+  phone?: string;
+  email?: string;
+}
+
+interface VenueSubscription {
+  plan?: SubscriptionPlanId;
+  planLabel?: string;
+  status: "active" | "past_due" | "canceled" | "trial";
+  price?: number;
+  validUntil?: string;
+}
 
 interface VenueDoc {
   id: string;
@@ -36,6 +54,11 @@ interface VenueDoc {
   missYouCampaign?: boolean;
   bountyActive?: boolean;
   bountyText?: string;
+  isPublished?: boolean;
+  subscriptionStatus?: "active" | "past_due" | "canceled";
+  monthlyPrice?: number;
+  validUntil?: string;
+  subscription?: VenueSubscription;
 }
 
 interface SlotDeal {
@@ -61,13 +84,7 @@ interface BookingRecord {
   date: string;
   status: "confirmed" | "used" | "checked_in" | "cancelled";
   orderMode?: "dine-in" | "takeaway";
-  customerId?: string; // <--- Πρόσθεσε αυτό!
-}
-
-interface SubscriptionInfo {
-  status: "active" | "past_due" | "canceled" | "trial";
-  planName?: string;
-  validUntil?: string;
+  customerId?: string;
 }
 
 const DAYS_OF_WEEK = [
@@ -84,10 +101,21 @@ const TIME_OPTIONS = [
   "12:00", "12:30", "13:00", "13:30", "14:00", "14:30",
   "15:00", "15:30", "16:00", "16:30", "17:00", "17:30",
   "18:00", "18:30", "19:00", "19:30", "20:00", "20:30",
-  "21:00", "21:30", "22:00", "22:30", "23:00", "23:30", "00:00"
+  "21:00", "21:30", "22:00", "22:30", "23:00", "23:30", "00:00",
 ];
 
 const DISCOUNT_PRESETS = ["-20%", "-30%", "-40%", "-50%"];
+
+const CATEGORIES = [
+  "Ελληνική Ταβέρνα",
+  "Εστιατόριο / Bistro",
+  "Καφέ / Brunch",
+  "Cocktail Bar / Wine Bar",
+  "Street Food / Burger",
+  "Ιταλικό / Pizza",
+  "Ασιατικό / Sushi",
+  "Άλλο",
+];
 
 function timeToMinutes(timeStr: string): number {
   const parts = timeStr.trim().split(":");
@@ -113,12 +141,7 @@ export default function MerchantDashboard() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthorizedMerchant, setIsAuthorizedMerchant] = useState<boolean | null>(null);
-
-  const [subscription, setSubscription] = useState<SubscriptionInfo>({
-    status: "active",
-    planName: "HappySeats Monthly Business",
-    validUntil: "30/11/2026",
-  });
+  const [merchantProfile, setMerchantProfile] = useState<MerchantProfile | null>(null);
 
   const [venues, setVenues] = useState<VenueDoc[]>([]);
   const [selectedVenue, setSelectedVenue] = useState<VenueDoc | null>(null);
@@ -141,6 +164,15 @@ export default function MerchantDashboard() {
   // Ειδοποίηση Νέας Κράτησης ή Αυτοματισμού
   const [newBookingAlert, setNewBookingAlert] = useState<string | null>(null);
   const previousBookingsCount = useRef<number | null>(null);
+
+  // Modal Προσθήκης Νέου Καταστήματος (2ο, 3ο κ.λπ.)
+  const [showAddVenueModal, setShowAddVenueModal] = useState(false);
+  const [addVenueName, setAddVenueName] = useState("");
+  const [addVenueArea, setAddVenueArea] = useState("");
+  const [addVenueAddress, setAddVenueAddress] = useState("");
+  const [addVenueCategory, setAddVenueCategory] = useState(CATEGORIES[0]);
+  const [addVenuePlan, setAddVenuePlan] = useState<SubscriptionPlanId>("biannual");
+  const [submittingVenue, setSubmittingVenue] = useState(false);
 
   // 1. Αυστηρός έλεγχος: Είναι συνδεδεμένος ΚΑΙ είναι καταχωρημένος ως Merchant;
   useEffect(() => {
@@ -175,14 +207,14 @@ export default function MerchantDashboard() {
 
         setCurrentUser(user);
         setIsAuthorizedMerchant(true);
-
-        if (merchantData.subscription) {
-          setSubscription({
-            status: merchantData.subscription.status || "active",
-            planName: merchantData.subscription.planName || "Monthly Business",
-            validUntil: merchantData.subscription.validUntil || "Ενεργή",
-          });
-        }
+        setMerchantProfile({
+          companyName: merchantData.companyName || "",
+          vatNumber: merchantData.vatNumber || "",
+          taxOffice: merchantData.taxOffice || "",
+          contactName: merchantData.contactName || user.displayName || "",
+          phone: merchantData.phone || "",
+          email: merchantData.email || user.email || "",
+        });
       } catch (err) {
         console.error("Σφάλμα ελέγχου merchant guard:", err);
         setIsAuthorizedMerchant(false);
@@ -194,57 +226,69 @@ export default function MerchantDashboard() {
     return () => unsub();
   }, [router]);
 
-  // 2. Real-time Venues του Εστιάτορα
+  // 2. Real-time Venues του Εστιάτορα (Multi-Venue)
   useEffect(() => {
     if (!currentUser) return;
 
-    const unsub = onSnapshot(collection(db, "venues"), (snap) => {
-      const list: VenueDoc[] = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        const matchesOwner =
-          data.ownerId === currentUser.uid ||
-          (currentUser.email &&
-            data.ownerEmail?.toLowerCase().trim() ===
-              currentUser.email.toLowerCase().trim());
+    const unsub = onSnapshot(
+      collection(db, "venues"),
+      (snap) => {
+        const list: VenueDoc[] = [];
+        snap.forEach((d) => {
+          const data = d.data();
+          const matchesOwner =
+            data.ownerId === currentUser.uid ||
+            (currentUser.email &&
+              data.ownerEmail?.toLowerCase().trim() ===
+                currentUser.email.toLowerCase().trim());
 
-        if (!matchesOwner) return;
+          if (!matchesOwner) return;
 
-        list.push({
-          id: d.id,
-          name: data.name || d.id,
-          slug: data.slug || d.id,
-          area: data.area || "",
-          tableStatus: data.tableStatus || "plenty",
-          takeawayReady: data.takeawayReady !== undefined ? Boolean(data.takeawayReady) : true,
-          panicDealActive: Boolean(data.panicDealActive),
-          panicDealText: data.panicDealText || "-30% Last-Minute Table (30')",
-          vibeTags: Array.isArray(data.vibeTags) ? data.vibeTags : [],
-          rainAutoDeal: Boolean(data.rainAutoDeal),
-          missYouCampaign: Boolean(data.missYouCampaign),
-          bountyActive: Boolean(data.bountyActive),
-          bountyText: data.bountyText || "-40% + Δωρεάν Ορεκτικό (Bounty 10')",
+          list.push({
+            id: d.id,
+            name: data.name || d.id,
+            slug: data.slug || d.id,
+            area: data.area || "",
+            tableStatus: data.tableStatus || "plenty",
+            takeawayReady:
+              data.takeawayReady !== undefined ? Boolean(data.takeawayReady) : true,
+            panicDealActive: Boolean(data.panicDealActive),
+            panicDealText: data.panicDealText || "-30% Last-Minute Table (30')",
+            vibeTags: Array.isArray(data.vibeTags) ? data.vibeTags : [],
+            rainAutoDeal: Boolean(data.rainAutoDeal),
+            missYouCampaign: Boolean(data.missYouCampaign),
+            bountyActive: Boolean(data.bountyActive),
+            bountyText: data.bountyText || "-40% + Δωρεάν Ορεκτικό (Bounty 10')",
+            isPublished: data.isPublished !== undefined ? Boolean(data.isPublished) : true,
+            subscriptionStatus: data.subscriptionStatus || "active",
+            monthlyPrice: data.monthlyPrice || 49,
+            validUntil: data.validUntil || "",
+            subscription: data.subscription,
+          });
         });
-      });
-      setVenues(list);
-      setVenuesLoading(false);
+        setVenues(list);
+        setVenuesLoading(false);
 
-      if (list.length > 0) {
-        const savedId =
-          typeof window !== "undefined"
-            ? localStorage.getItem("happyseats_merchant_venueId")
-            : null;
-        const matched = list.find((v) => v.id === savedId) || list[0];
-        setSelectedVenue(matched);
-      } else {
-        setSelectedVenue(null);
+        if (list.length > 0) {
+          const savedId =
+            typeof window !== "undefined"
+              ? localStorage.getItem("happyseats_merchant_venueId")
+              : null;
+          const matched = list.find((v) => v.id === savedId) || list[0];
+          setSelectedVenue(matched);
+        } else {
+          setSelectedVenue(null);
+        }
+      },
+      (err) => {
+        if (err.code !== "permission-denied") console.error(err);
       }
-    });
+    );
 
     return () => unsub();
   }, [currentUser]);
 
-  // 3. Real-time Slots
+  // 3. Real-time Slots για το επιλεγμένο κατάστημα
   useEffect(() => {
     if (!selectedVenue) return;
 
@@ -267,6 +311,7 @@ export default function MerchantDashboard() {
   // 4. Real-time Bookings & Ήχος Καμπανάκι
   useEffect(() => {
     if (!selectedVenue) return;
+    previousBookingsCount.current = null;
 
     const q = query(
       collection(db, "bookings"),
@@ -318,6 +363,22 @@ export default function MerchantDashboard() {
     return () => unsub();
   }, [selectedVenue]);
 
+  // Στοιχεία συνδρομής για το ΕΠΙΛΕΓΜΕΝΟ κατάστημα
+  const activeVenueSub = useMemo(() => {
+    const status =
+      selectedVenue?.subscription?.status ||
+      selectedVenue?.subscriptionStatus ||
+      "active";
+    const planLabel = selectedVenue?.subscription?.planLabel || "Μηνιαίο";
+    const price =
+      selectedVenue?.subscription?.price ?? selectedVenue?.monthlyPrice ?? 49;
+    const validUntil =
+      selectedVenue?.subscription?.validUntil || selectedVenue?.validUntil || "";
+    const isActive = status === "active" && selectedVenue?.isPublished !== false;
+
+    return { status, planLabel, price, validUntil, isActive };
+  }, [selectedVenue]);
+
   // Smart Analytics
   const stats = useMemo(() => {
     const totalBookings = bookings.length;
@@ -347,7 +408,7 @@ export default function MerchantDashboard() {
     };
   }, [bookings]);
 
-  // Εκκίνηση Πληρωμής Συνδρομής μέσω Stripe Checkout
+  // Εκκίνηση Πληρωμής Συνδρομής μέσω Stripe Checkout (για το επιλεγμένο κατάστημα)
   const handleStripeCheckout = async () => {
     try {
       const res = await fetch("/api/checkout", {
@@ -356,8 +417,9 @@ export default function MerchantDashboard() {
         body: JSON.stringify({
           merchantId: currentUser?.uid,
           merchantEmail: currentUser?.email,
+          venueId: selectedVenue?.id,
           venueName: selectedVenue?.name || "Κατάστημα",
-          monthlyPrice: 49,
+          monthlyPrice: activeVenueSub.price,
         }),
       });
       const data = await res.json();
@@ -369,6 +431,78 @@ export default function MerchantDashboard() {
     } catch (err) {
       console.error(err);
       alert("Σφάλμα σύνδεσης με την πύλη πληρωμών Stripe.");
+    }
+  };
+
+  // Υποβολή αίτησης για Προσθήκη Νέου Καταστήματος (με ξεχωριστή συνδρομή)
+  const handleApplyNewVenue = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentUser) return;
+    setSubmittingVenue(true);
+
+    const plan = SUBSCRIPTION_PLANS[addVenuePlan];
+    const cleanEmail = (
+      merchantProfile?.email ||
+      currentUser.email ||
+      ""
+    ).toLowerCase();
+    const paymentReference = `HS-${new Date().getFullYear()}-${Math.floor(
+      1000 + Math.random() * 9000
+    )}`;
+
+    try {
+      await addDoc(collection(db, "partner_applications"), {
+        companyName: merchantProfile?.companyName || "Υπάρχων Συνεργάτης",
+        vatNumber: merchantProfile?.vatNumber || "—",
+        taxOffice: merchantProfile?.taxOffice || "—",
+        contactName:
+          merchantProfile?.contactName || currentUser.displayName || "Συνεργάτης",
+        phone: merchantProfile?.phone || "—",
+        email: cleanEmail,
+        venueName: addVenueName.trim(),
+        venueArea: addVenueArea.trim(),
+        venueAddress: addVenueAddress.trim(),
+        venueCategory: addVenueCategory,
+        notes: "Αίτημα προσθήκης επιπλέον καταστήματος από υπάρχοντα συνεργάτη.",
+        planId: plan.id,
+        planLabel: plan.label,
+        durationMonths: plan.durationMonths,
+        price: plan.price,
+        paymentReference,
+        status: "pending",
+        createdAt: serverTimestamp(),
+      });
+
+      await fetch("/api/send-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "application_received",
+          to: cleanEmail,
+          contactName: merchantProfile?.contactName || "Συνεργάτη",
+          companyName: merchantProfile?.companyName || "",
+          venueName: addVenueName.trim(),
+          venueArea: addVenueArea.trim(),
+          phone: merchantProfile?.phone,
+          vatNumber: merchantProfile?.vatNumber,
+          planLabel: plan.label,
+          price: plan.price,
+          paymentReference,
+        }),
+      });
+
+      setShowAddVenueModal(false);
+      setAddVenueName("");
+      setAddVenueArea("");
+      setAddVenueAddress("");
+      setNewBookingAlert(
+        `✓ Η αίτηση για το νέο κατάστημα "${addVenueName.trim()}" υποβλήθηκε! Θα λάβετε email μόλις προεγκριθεί.`
+      );
+    } catch (err) {
+      console.error(err);
+      alert("Σφάλμα κατά την υποβολή της αίτησης.");
+    } finally {
+      setSubmittingVenue(false);
     }
   };
 
@@ -388,12 +522,14 @@ export default function MerchantDashboard() {
     if (!selectedVenue) return;
     try {
       if (booking) {
-        // Ακυρώνουμε την κράτηση
         await updateDoc(doc(db, "bookings", booking.id), { status: "cancelled" });
-        
-        // 🔴 ΝΕΟ: Ποινή No-Show (Μηδενίζουμε το Streak του!)
+
         if (booking.customerId && booking.customerId !== "guest") {
-          await setDoc(doc(db, "users", booking.customerId), { streak: 0 }, { merge: true });
+          await setDoc(
+            doc(db, "users", booking.customerId),
+            { streak: 0 },
+            { merge: true }
+          );
         }
       }
       await updateShiftLive({
@@ -419,9 +555,9 @@ export default function MerchantDashboard() {
     if (!selectedVenue) return;
     setFormError(null);
 
-    if (subscription.status !== "active") {
+    if (!activeVenueSub.isActive) {
       setFormError(
-        "Απαιτείται ενεργή συνδρομή για τη δημιουργία νέων χρονοθυρίδων."
+        "Απαιτείται ενεργή συνδρομή για αυτό το κατάστημα ώστε να ανοίξετε νέες χρονοθυρίδες."
       );
       return;
     }
@@ -517,10 +653,10 @@ export default function MerchantDashboard() {
             Σύνδεση με Εταιρικό Λογαριασμό
           </button>
           <Link
-            href="/"
+            href="/merchant/apply"
             className="px-4 py-2 bg-subtle hover:bg-border-theme text-text-main rounded-xl text-xs font-semibold transition border border-border-theme"
           >
-            Αρχική Σελίδα
+            Αίτηση Συνεργασίας
           </Link>
         </div>
       </div>
@@ -542,20 +678,24 @@ export default function MerchantDashboard() {
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs uppercase tracking-widest text-brand-text font-bold">
-              Merchant Operations
+              {merchantProfile?.companyName || "Merchant Operations"}
             </span>
             <span className="text-[10px] bg-subtle text-text-muted font-medium px-2 py-0.5 rounded-full border border-border-theme">
               {currentUser?.email}
             </span>
             <span
               className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
-                subscription.status === "active"
+                activeVenueSub.isActive
                   ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
                   : "bg-red-50 text-red-700 border border-red-200"
               }`}
             >
-              {subscription.status === "active"
-                ? "✓ Συνδρομή Ενεργή"
+              {activeVenueSub.isActive
+                ? `✓ ${activeVenueSub.planLabel}${
+                    activeVenueSub.validUntil
+                      ? ` • έως ${activeVenueSub.validUntil}`
+                      : ""
+                  }`
                 : "⚠️ Ανενεργή Συνδρομή"}
             </span>
           </div>
@@ -565,31 +705,41 @@ export default function MerchantDashboard() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          <select
-            value={selectedVenue?.id || ""}
-            onChange={(e) => {
-              const v = venues.find((item) => item.id === e.target.value);
-              if (v) {
-                setSelectedVenue(v);
-                localStorage.setItem("happyseats_merchant_venueId", v.id);
-                localStorage.setItem("happyseats_merchant_venueName", v.name);
-              }
-            }}
-            className="bg-card border border-border-theme text-brand-text font-bold text-xs rounded-xl px-3 py-2.5 focus:outline-none cursor-pointer shadow-sm"
+          {venues.length > 0 && (
+            <select
+              value={selectedVenue?.id || ""}
+              onChange={(e) => {
+                const v = venues.find((item) => item.id === e.target.value);
+                if (v) {
+                  setSelectedVenue(v);
+                  localStorage.setItem("happyseats_merchant_venueId", v.id);
+                  localStorage.setItem("happyseats_merchant_venueName", v.name);
+                }
+              }}
+              className="bg-card border-2 border-brand text-brand-text font-bold text-xs rounded-xl px-3 py-2 focus:outline-none cursor-pointer shadow-sm"
+            >
+              {venues.map((v) => (
+                <option key={v.id} value={v.id}>
+                  📍 {v.name} {v.area ? `(${v.area})` : ""}
+                </option>
+              ))}
+            </select>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setShowAddVenueModal(true)}
+            className="px-3.5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl transition shadow-sm flex items-center gap-1 cursor-pointer"
           >
-            {venues.map((v) => (
-              <option key={v.id} value={v.id}>
-                📍 {v.name}
-              </option>
-            ))}
-          </select>
+            <span>+</span> Νέο Κατάστημα
+          </button>
 
           <button
             type="button"
             onClick={handleStripeCheckout}
             className="px-3.5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition shadow-sm flex items-center gap-1.5 cursor-pointer"
           >
-            <span>💳</span> Συνδρομή Stripe (49€)
+            <span>💳</span> Συνδρομή Stripe ({activeVenueSub.price}€)
           </button>
 
           <Link
@@ -612,11 +762,19 @@ export default function MerchantDashboard() {
           >
             Αποσύνδεση
           </button>
+          
+          <Link
+            href="/"
+            className="px-3.5 py-2.5 bg-card hover:bg-subtle text-text-main border border-border-theme text-xs font-semibold rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+          >
+            ← Αρχική
+          </Link>
+
         </div>
       </header>
 
       <main className="max-w-6xl mx-auto py-8 space-y-6">
-        {/* Banner Ειδοποίησης Νέας Κράτησης ή Bounty */}
+        {/* Banner Ειδοποίησης Νέας Κράτησης, Bounty ή Αίτησης */}
         {newBookingAlert && (
           <div className="p-4 bg-amber-50 border-2 border-amber-400 text-amber-950 rounded-2xl flex items-center justify-between shadow-sm">
             <div className="flex items-center gap-2 font-bold text-xs sm:text-sm">
@@ -631,17 +789,16 @@ export default function MerchantDashboard() {
           </div>
         )}
 
-        {/* Subscription Guard Notice (Αν η συνδρομή έχει λήξει) */}
-        {subscription.status !== "active" && (
+        {/* Subscription Guard Notice (Αν η συνδρομή του επιλεγμένου καταστήματος έχει λήξει) */}
+        {selectedVenue && !activeVenueSub.isActive && (
           <div className="p-5 bg-red-50 border-2 border-red-300 rounded-3xl flex flex-col sm:flex-row items-center justify-between gap-4">
             <div>
               <h3 className="font-bold text-red-800 text-sm">
-                ⚠️ Η μηνιαία συνδρομή σας δεν είναι ενεργή
+                ⚠️ Η συνδρομή για το &quot;{selectedVenue.name}&quot; δεν είναι ενεργή
               </h3>
               <p className="text-xs text-red-600 mt-0.5">
-                Τα τραπέζια του καταστήματός σας έχουν τεθεί προσωρινά σε παύση.
-                Ανανεώστε τη συνδρομή σας μέσω Stripe για να συνεχίσετε να
-                δέχεστε κρατήσεις.
+                Τα τραπέζια αυτού του καταστήματος έχουν τεθεί προσωρινά σε παύση.
+                Ανανεώστε τη συνδρομή του για να συνεχίσετε να δέχεστε κρατήσεις.
               </p>
             </div>
             <button
@@ -649,7 +806,7 @@ export default function MerchantDashboard() {
               onClick={handleStripeCheckout}
               className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-bold text-xs rounded-xl shadow-sm shrink-0 cursor-pointer"
             >
-              Ανανέωση Συνδρομής (49€/μήνα) →
+              Ανανέωση Συνδρομής ({activeVenueSub.price}€) →
             </button>
           </div>
         )}
@@ -666,6 +823,10 @@ export default function MerchantDashboard() {
                   Ζωντανή Πληρότητα, Flash Deals & No-Show Bounty ({selectedVenue.name})
                 </h3>
               </div>
+              <span className="text-xs text-text-muted">
+                Καταστήματα στον λογαριασμό:{" "}
+                <strong className="text-text-main">{venues.length}</strong>
+              </span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -1261,6 +1422,130 @@ export default function MerchantDashboard() {
           </div>
         </div>
       </main>
+
+      {/* MODAL: ΠΡΟΣΘΗΚΗ ΝΕΟΥ ΚΑΤΑΣΤΗΜΑΤΟΣ */}
+      {showAddVenueModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-card border border-border-theme rounded-3xl p-6 max-w-md w-full space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-black">➕ Προσθήκη Νέου Καταστήματος</h3>
+              <button
+                type="button"
+                onClick={() => setShowAddVenueModal(false)}
+                className="text-text-muted hover:text-text-main cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-xs text-text-muted">
+              Κάθε κατάστημα απαιτεί ξεχωριστή συνδρομή. Τα στοιχεία εταιρείας/ΑΦΜ θα
+              συμπληρωθούν αυτόματα από τον λογαριασμό σας.
+            </p>
+
+            <form onSubmit={handleApplyNewVenue} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-semibold text-text-muted mb-1">
+                  Όνομα Νέου Καταστήματος *
+                </label>
+                <input
+                  required
+                  type="text"
+                  value={addVenueName}
+                  onChange={(e) => setAddVenueName(e.target.value)}
+                  placeholder="π.χ. Το Κουτούκι - Γλυφάδα"
+                  className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block font-semibold text-text-muted mb-1">
+                    Περιοχή *
+                  </label>
+                  <input
+                    required
+                    type="text"
+                    value={addVenueArea}
+                    onChange={(e) => setAddVenueArea(e.target.value)}
+                    placeholder="π.χ. Γλυφάδα"
+                    className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-text-muted mb-1">
+                    Κατηγορία *
+                  </label>
+                  <select
+                    value={addVenueCategory}
+                    onChange={(e) => setAddVenueCategory(e.target.value)}
+                    className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm"
+                  >
+                    {CATEGORIES.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-text-muted mb-1">
+                  Διεύθυνση *
+                </label>
+                <input
+                  required
+                  type="text"
+                  value={addVenueAddress}
+                  onChange={(e) => setAddVenueAddress(e.target.value)}
+                  placeholder="Οδός & αριθμός"
+                  className="w-full bg-subtle border border-border-theme rounded-xl px-3.5 py-2.5 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-text-muted mb-1.5">
+                  Επιλογή Πακέτου Συνδρομής *
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {PLAN_LIST.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => setAddVenuePlan(p.id)}
+                      className={`p-2.5 rounded-xl border-2 text-center transition cursor-pointer ${
+                        addVenuePlan === p.id
+                          ? "border-brand bg-brand/10"
+                          : "border-border-theme bg-subtle"
+                      }`}
+                    >
+                      <div className="font-bold">{p.label}</div>
+                      <div className="text-brand font-black mt-0.5">{p.price}€</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddVenueModal(false)}
+                  className="flex-1 py-2.5 bg-subtle rounded-xl font-bold cursor-pointer"
+                >
+                  Άκυρο
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingVenue}
+                  className="flex-1 py-2.5 bg-brand hover:bg-brand-hover text-white rounded-xl font-bold cursor-pointer disabled:opacity-50"
+                >
+                  {submittingVenue ? "Υποβολή..." : "Υποβολή Αίτησης"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
