@@ -19,7 +19,7 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
-import { VIBE_OPTIONS } from "@/app/page";
+import { VIBE_OPTIONS } from "@/app/explore/page";
 import type { TableStatus } from "@/components/VenueMap";
 
 interface VenueDoc {
@@ -508,10 +508,11 @@ export default function MerchantDashboard() {
         </p>
         <div className="flex gap-3 pt-2">
           <button
-            onClick={() => {
-              signOut(auth);
-              router.push("/merchant/login");
-            }}
+            onClick={async () => {
+  await signOut(auth);
+  router.push("/");
+}}
+
             className="px-4 py-2 bg-brand hover:bg-brand-hover text-white rounded-xl text-xs font-bold transition shadow-sm cursor-pointer"
           >
             Σύνδεση με Εταιρικό Λογαριασμό

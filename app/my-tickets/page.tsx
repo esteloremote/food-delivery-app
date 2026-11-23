@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
 import { onAuthStateChanged, signOut, User } from "firebase/auth";
@@ -24,6 +25,7 @@ interface BookingRecord {
 }
 
 export default function MyTicketsPage() {
+  const router = useRouter();
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [tickets, setTickets] = useState<BookingRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -104,8 +106,8 @@ export default function MyTicketsPage() {
     <div className="min-h-screen bg-surface text-text-main p-6">
       <header className="max-w-4xl mx-auto flex items-center justify-between pb-6 border-b border-border-theme">
         <div>
-          <Link href="/" className="text-xs text-text-muted hover:text-text-main transition font-medium">
-            ← Επιστροφή στην Αρχική
+          <Link href="/explore" className="text-xs text-text-muted hover:text-text-main transition font-medium">
+            ← Επιστροφή στις Προσφορές
           </Link>
           <h1 className="text-2xl font-black text-text-main mt-1">🎟️ Τα Εισιτήριά μου</h1>
         </div>
@@ -117,7 +119,10 @@ export default function MyTicketsPage() {
                 👤 {currentUser.displayName || currentUser.email}
               </span>
               <button
-                onClick={() => signOut(auth)}
+                onClick={async () => {
+                  await signOut(auth);
+                  router.push("/");
+                }}
                 className="text-xs px-3 py-1.5 bg-card hover:bg-subtle text-text-muted hover:text-red-600 rounded-xl transition border border-border-theme shadow-sm cursor-pointer"
               >
                 Αποσύνδεση
@@ -125,7 +130,7 @@ export default function MyTicketsPage() {
             </div>
           ) : (
             <Link
-              href="/login"
+              href="/"
               className="text-xs font-bold px-3.5 py-2 bg-brand hover:bg-brand-hover text-white rounded-xl transition shadow-sm"
             >
               Σύνδεση Πελάτη
@@ -141,7 +146,7 @@ export default function MyTicketsPage() {
               💡 <strong>Συμβουλή:</strong> Συνδεθείτε για να συγχρονίζονται αυτόματα τα εισιτήριά σας σε όλες τις συσκευές σας.
             </span>
             <Link
-              href="/login"
+              href="/"
               className="px-3 py-1.5 bg-brand text-white font-bold rounded-lg shrink-0 hover:bg-brand-hover transition shadow-sm"
             >
               Σύνδεση / Εγγραφή →
@@ -156,11 +161,11 @@ export default function MyTicketsPage() {
             <span className="text-4xl">🎟️</span>
             <h3 className="text-lg font-bold text-text-main">Δεν έχετε ενεργά εισιτήρια</h3>
             <p className="text-xs text-text-muted max-w-sm mx-auto">
-              Εξερευνήστε τις διαθέσιμες προσφορές στην αρχική σελίδα και κλείστε το τραπέζι σας με έκπτωση!
+              Εξερευνήστε τις διαθέσιμες προσφορές και κλείστε το τραπέζι σας με έκπτωση!
             </p>
             <div className="pt-2">
               <Link
-                href="/"
+                href="/explore"
                 className="inline-block px-5 py-2.5 bg-brand hover:bg-brand-hover text-white font-bold rounded-xl text-xs transition shadow-sm"
               >
                 Αναζήτηση Προσφορών →
