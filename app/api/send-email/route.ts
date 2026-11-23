@@ -104,7 +104,7 @@ function buildEmailContent(data: EmailPayload): { subject: string; html: string 
               : `<p style="margin: 6px 0 0;"><strong>Προσωρινός Κωδικός:</strong> <code>${data.tempPassword}</code></p>`
           }
         </div>
-        <p>Μπορείτε να συνδεθείτε στο Πάνελ Συνεργατών (<code>/merchant/login</code>) για να διαχειριστείτε τις χρονοθυρίδες και τις προσφορές σας.</p>
+        <p>Μπορείτε να συνδεθείτε στο Πάνελ Συνεργατών (<code>/login</code>) για να διαχειριστείτε τις χρονοθυρίδες και τις προσφορές σας.</p>
         <p style="color: #6b7280; font-size: 12px; margin-top: 24px;">Καλή αρχή,<br/>Η ομάδα του HappySeats</p>
       </div>
     `,

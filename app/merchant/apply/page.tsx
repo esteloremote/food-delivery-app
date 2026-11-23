@@ -132,7 +132,7 @@ export default function PartnerApplyPage() {
               Επιστροφή στην Αρχική
             </Link>
             <Link
-              href="/merchant/login"
+              href="/login"
               className="w-full py-2 text-xs font-semibold text-text-muted hover:text-text-main transition"
             >
               Είστε ήδη συνεργάτης; Σύνδεση →
@@ -156,7 +156,7 @@ export default function PartnerApplyPage() {
             </p>
           </div>
           <Link
-            href="/merchant/login"
+            href="/login"
             className="text-xs font-bold px-3.5 py-2 bg-card border border-border-theme rounded-xl hover:bg-subtle transition"
           >
             ← Σύνδεση Συνεργατών

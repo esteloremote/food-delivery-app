@@ -44,7 +44,7 @@ export default function MerchantScanPage() {
       if (!user) {
         setIsAuthorizedMerchant(false);
         setAuthLoading(false);
-        router.push("/merchant/login");
+        router.push("/login");
         return;
       }
 
@@ -196,7 +196,7 @@ export default function MerchantScanPage() {
           Ο QR Scanner προορίζεται αποκλειστικά για εξουσιοδοτημένους συνεργάτες εστίασης.
         </p>
         <Link
-          href="/merchant/login"
+          href="/login"
           className="px-4 py-2 bg-brand text-white rounded-xl text-xs font-bold shadow-sm"
         >
           Σύνδεση Συνεργάτη →

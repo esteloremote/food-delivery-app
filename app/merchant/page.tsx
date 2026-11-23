@@ -180,7 +180,7 @@ export default function MerchantDashboard() {
       if (!user) {
         setIsAuthorizedMerchant(false);
         setAuthLoading(false);
-        router.push("/merchant/login");
+        router.push("/login");
         return;
       }
 
@@ -646,7 +646,7 @@ export default function MerchantDashboard() {
           <button
             onClick={() => {
               signOut(auth);
-              router.push("/merchant/login");
+              router.push("/login");
             }}
             className="px-4 py-2 bg-brand hover:bg-brand-hover text-white rounded-xl text-xs font-bold transition shadow-sm cursor-pointer"
           >
