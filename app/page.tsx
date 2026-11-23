@@ -18,6 +18,9 @@ type AuthMode = "signin" | "signup";
 export default function PreEntryLampGate() {
   const router = useRouter();
 
+  // Έλεγχος αν ο χρήστης είναι ήδη συνδεδεμένος ώστε να μην "αναβοσβήνει" η λάμπα
+  const [checkingAuth, setCheckingAuth] = useState(true);
+
   // Κατάσταση Λάμπας (Αναμμένη / Σβηστή) & Τράβηγμα Κορδονιού
   const [lampOn, setLampOn] = useState(true);
   const [pullingCord, setPullingCord] = useState(false);
@@ -37,7 +40,10 @@ export default function PreEntryLampGate() {
   // Αν ο χρήστης είναι ήδη συνδεδεμένος, τον κατευθύνουμε αυτόματα στο σωστό περιβάλλον
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
-      if (!user) return;
+      if (!user) {
+        setCheckingAuth(false);
+        return;
+      }
       try {
         const merchantSnap = await getDoc(doc(db, "merchants", user.uid));
         if (merchantSnap.exists()) {
@@ -46,7 +52,7 @@ export default function PreEntryLampGate() {
           router.replace("/explore");
         }
       } catch {
-        // Αν αποτύχει ο έλεγχος, μένει στη σελίδα εισόδου
+        setCheckingAuth(false);
       }
     });
     return () => unsub();
@@ -182,6 +188,10 @@ export default function PreEntryLampGate() {
       setLoading(false);
     }
   };
+
+  if (checkingAuth) {
+    return <div className="min-h-screen bg-[#070b10]" />;
+  }
 
   // Χρώμα δέσμης φωτός ανάλογα με τον ρόλο (Πορτοκαλί για Πελάτη, Κυανό/Τιρκουάζ για Μαγαζάτορα)
   const isMerchant = role === "merchant";

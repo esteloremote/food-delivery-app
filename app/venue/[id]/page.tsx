@@ -117,7 +117,7 @@ export default function VenueProfilePage({
 
     if (!currentUser) {
       alert("Παρακαλώ συνδεθείτε για να ολοκληρώσετε την κράτηση.");
-      router.push("/login");
+      router.push("/");
       return;
     }
 
@@ -193,7 +193,7 @@ export default function VenueProfilePage({
           Το κατάστημα που αναζητάτε δεν δέχεται κρατήσεις αυτή τη στιγμή ή έχει αφαιρεθεί.
         </p>
         <Link
-          href="/"
+          href="/explore"
           className="px-4 py-2 bg-brand text-white rounded-xl text-xs font-bold shadow-sm"
         >
           ← Επιστροφή στην Αρχική
@@ -217,7 +217,7 @@ export default function VenueProfilePage({
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
         <div className="absolute top-6 left-6 right-6 max-w-5xl mx-auto flex justify-between items-center">
           <Link
-            href="/"
+            href="/explore"
             className="px-3.5 py-2 bg-card/90 hover:bg-card text-text-main backdrop-blur-md rounded-xl text-xs font-semibold border border-border-theme transition shadow-sm"
           >
             ← Επιστροφή
