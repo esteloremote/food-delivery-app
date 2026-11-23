@@ -10,6 +10,7 @@ import {
   collection,
   onSnapshot,
   doc,
+  getDoc,
   runTransaction,
   serverTimestamp,
   query,
@@ -291,6 +292,8 @@ export default function Home() {
   const [currentBooking, setCurrentBooking] = useState<Booking | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const [isMerchantUser, setIsMerchantUser] = useState(false);
+
   // Φίλτρα
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedArea, setSelectedArea] = useState("all");
@@ -345,6 +348,9 @@ export default function Home() {
       setCurrentUser(user);
       if (user) {
         try {
+
+          const mSnap = await getDoc(doc(db, "merchants", user.uid));
+          setIsMerchantUser(mSnap.exists());
           // Live παρακολούθηση VIP Streak & Micro-Zone Pass από Firestore
           unsubUser = onSnapshot(
             doc(db, "users", user.uid),
@@ -395,6 +401,7 @@ export default function Home() {
         setUserStreak(0);
         setVerifiedPass(null);
         setShowMissYouBanner(false);
+        setIsMerchantUser(false);
       }
     });
 
@@ -1086,12 +1093,14 @@ export default function Home() {
             </Link>
           )}
 
-          <Link
-            href="/merchant"
-            className="text-xs font-semibold px-3 py-2 bg-card hover:bg-brand-light text-brand-text rounded-xl transition border border-border-theme shadow-sm hidden md:inline-block"
-          >
-            Συνεργάτες Εστίασης →
-          </Link>
+          {isMerchantUser && (
+            <Link
+              href="/merchant"
+              className="text-xs font-bold px-3 py-2 bg-sky-600 hover:bg-sky-700 text-white rounded-xl transition shadow-sm flex items-center gap-1"
+            >
+              🏪 Το Κατάστημά μου
+            </Link>
+          )}
 
           {currentUser?.email &&
             [
